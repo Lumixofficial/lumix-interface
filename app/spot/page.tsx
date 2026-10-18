@@ -2,8 +2,6 @@
 
 import dynamic from "next/dynamic";
 import { useEffect } from "react";
-import { AppFooter } from "@/components/app-footer";
-import { AppHeader } from "@/components/app-header";
 import { useWallet } from "@/components/wallet-provider";
 import { SpotCardLoading } from "@/components/spot-loading";
 import "./spot.css";
@@ -16,18 +14,14 @@ export default function SpotPage() {
   // Download the page's SDK chunk alongside wallet startup, not after it.
   useEffect(() => { void loadWorkspace(); }, []);
   return (
-    <div className="trade-app-shell min-h-screen">
-      <AppHeader />
-      <main className="spot-page trade-container">
-        <div className="spot-intro">
-          <div>
-            <h1>Spot</h1>
-            <p>Swap your assets.</p>
-          </div>
+    <main className="spot-page trade-container">
+      <div className="spot-intro">
+        <div>
+          <h1>Spot</h1>
+          <p>Swap your assets.</p>
         </div>
-        {wallet.isReady ? <SpotWorkspace /> : <SpotCardLoading />}
-      </main>
-      <AppFooter />
-    </div>
+      </div>
+      {wallet.isReady ? <SpotWorkspace /> : <SpotCardLoading />}
+    </main>
   );
 }

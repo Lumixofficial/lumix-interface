@@ -5336,6 +5336,100 @@ button {
   }
 }
 
+/* Coming-soon preview gate */
+.coming-soon-gate {
+  /* Fills the first viewport below the two header rows (3.75rem + 3.25rem) and their 1px divider. */
+  position: relative;
+  height: calc(100dvh - 7rem - 1px);
+  min-height: 30rem;
+  overflow: hidden;
+  overflow: clip;
+  isolation: isolate;
+}
+
+.coming-soon-preview {
+  filter: blur(12px) saturate(0.8);
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.coming-soon-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  padding: var(--trade-space-4);
+  background:
+    linear-gradient(to bottom, transparent 72%, var(--trade-bg-canvas)),
+    radial-gradient(ellipse 48% 42% at 50% 50%, color-mix(in srgb, var(--trade-bg-canvas) 35%, transparent), transparent),
+    color-mix(in srgb, var(--trade-bg-canvas) 50%, transparent);
+  animation: trade-fade-in var(--trade-duration-modal) var(--trade-ease-enter) both;
+}
+
+.coming-soon-card {
+  display: grid;
+  width: min(100%, 27rem);
+  min-width: 0;
+  justify-items: center;
+  padding: var(--trade-space-10) var(--trade-space-8);
+  border: 1px solid var(--trade-border-default);
+  border-radius: var(--trade-radius-panel);
+  background: var(--trade-bg-overlay);
+  box-shadow: var(--trade-overlay-shadow);
+  color: var(--trade-text-primary);
+  text-align: center;
+  animation: trade-slide-up var(--trade-duration-modal) var(--trade-ease-enter) both;
+}
+
+.coming-soon-context {
+  margin: 0 0 var(--trade-space-3);
+  color: var(--trade-text-muted);
+  font-size: var(--trade-type-small-size);
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.coming-soon-card h1 {
+  margin: 0;
+  color: var(--trade-text-primary);
+  font-size: var(--trade-type-h3-size);
+  font-weight: 700;
+  letter-spacing: var(--trade-tracking-heading);
+  line-height: 1.2;
+  text-wrap: balance;
+}
+
+.coming-soon-description {
+  max-width: 34ch;
+  margin: var(--trade-space-3) 0 0;
+  color: var(--trade-text-secondary);
+  font-size: var(--trade-type-body-size);
+  line-height: var(--trade-type-body-line);
+  text-wrap: pretty;
+}
+
+@media (max-width: 47.9375rem) {
+  .coming-soon-preview {
+    filter: blur(10px) saturate(0.8);
+  }
+
+  .coming-soon-card {
+    padding: var(--trade-space-8) var(--trade-space-6);
+  }
+
+  .coming-soon-card h1 {
+    font-size: 1.5rem;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .coming-soon-overlay {
+    background: color-mix(in srgb, var(--trade-bg-canvas) 82%, transparent);
+  }
+}
+
 /* Portfolio */
 .portfolio-shell { display: flex; min-height: 100vh; min-height: 100dvh; flex-direction: column; }
 .portfolio-shell > .trade-app-header, .portfolio-shell > .app-footer { flex-shrink: 0; }

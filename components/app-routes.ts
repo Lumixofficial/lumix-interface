@@ -9,10 +9,10 @@ export const APP_ROUTES = {
 
 export const FEATURES = {
   spot: { label: "Spot", route: APP_ROUTES.spot, comingSoon: false },
-  options: { label: "Options", route: APP_ROUTES.options, comingSoon: false },
-  perpetuals: { label: "Perpetuals", route: APP_ROUTES.perpetuals, comingSoon: false },
-  earnVaults: { label: "Earn", route: APP_ROUTES.earnVaults, comingSoon: false },
-  portfolio: { label: "Portfolio", route: APP_ROUTES.portfolio, comingSoon: false },
+  options: { label: "Options", route: APP_ROUTES.options, comingSoon: true },
+  perpetuals: { label: "Perpetuals", route: APP_ROUTES.perpetuals, comingSoon: true },
+  earnVaults: { label: "Earn", route: APP_ROUTES.earnVaults, comingSoon: true },
+  portfolio: { label: "Portfolio", route: APP_ROUTES.portfolio, comingSoon: true },
 } as const;
 
 export type FeatureId = keyof typeof FEATURES;

@@ -1,4 +1,4 @@
-import { FEATURES, type FeatureId, type ProductNavigationLabel } from "./app-routes";
+import type { ProductNavigationLabel } from "./app-routes";
 import { AppFooter } from "./app-footer";
 import { AppHeader } from "./app-header";
 import { AppBackButton } from "./app-navigation";
@@ -24,17 +24,5 @@ export function AppStatusPage({ context, title, description, activeItem = null }
       </main>
       <AppFooter />
     </div>
-  );
-}
-
-export function ComingSoonPage({ feature }: { feature: FeatureId }) {
-  const configuration = FEATURES[feature];
-  return (
-    <AppStatusPage
-      context={configuration.label}
-      title="Coming soon"
-      description="We’re working on this. Check back soon."
-      activeItem={configuration.label}
-    />
   );
 }

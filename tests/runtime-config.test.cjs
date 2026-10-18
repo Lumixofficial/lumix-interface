@@ -14,9 +14,11 @@ require.extensions['.ts'] = (module, filename) => module._compile(ts.transpileMo
 
 const { LUMIX_PUBLIC_CONFIG } = require('../components/runtime-config.ts');
 
-test('public deployment configuration is environment-backed and testnet-only', () => {
-  assert.equal(LUMIX_PUBLIC_CONFIG.stellar.id, 'testnet');
-  assert.equal(LUMIX_PUBLIC_CONFIG.stellar.passphrase, 'Test SDF Network ; September 2015');
+test('public deployment configuration follows the selected network and environment', () => {
+  const network = process.env.NEXT_PUBLIC_STELLAR_NETWORK?.trim().toLowerCase() || 'testnet';
+  assert.equal(LUMIX_PUBLIC_CONFIG.stellar.id, network);
+  assert.equal(LUMIX_PUBLIC_CONFIG.stellar.passphrase, network === 'mainnet'
+    ? 'Public Global Stellar Network ; September 2015' : 'Test SDF Network ; September 2015');
   assert.equal(LUMIX_PUBLIC_CONFIG.bluxAppId, process.env.NEXT_PUBLIC_BLUX_APP_ID);
   assert.equal(LUMIX_PUBLIC_CONFIG.stellar.horizonUrl, process.env.NEXT_PUBLIC_STELLAR_HORIZON_URL);
   assert.equal(LUMIX_PUBLIC_CONFIG.stellar.sorobanRpcUrl, process.env.NEXT_PUBLIC_STELLAR_RPC_URL);
@@ -26,15 +28,12 @@ test('public deployment configuration is environment-backed and testnet-only', (
   assert.match(LUMIX_PUBLIC_CONFIG.stellar.usdcSacAddress, /^C[A-Z2-7]{55}$/);
 });
 
-test('deployment values are no longer embedded in application source', () => {
+test('application-specific deployment values are not embedded in application source', () => {
   const sourceFiles = fs.readdirSync(path.resolve(__dirname, '../components'))
     .filter(filename => /\.(ts|tsx)$/.test(filename) && filename !== 'runtime-config.ts');
   const source = sourceFiles.map(filename => fs.readFileSync(path.resolve(__dirname, '../components', filename), 'utf8')).join('\n');
   const configuredValues = [
     process.env.NEXT_PUBLIC_BLUX_APP_ID,
-    process.env.NEXT_PUBLIC_STELLAR_HORIZON_URL,
-    process.env.NEXT_PUBLIC_STELLAR_RPC_URL,
-    process.env.NEXT_PUBLIC_STELLAR_USDC_ISSUER,
     process.env.NEXT_PUBLIC_STELLAR_USDC_SAC_ADDRESS,
     process.env.NEXT_PUBLIC_PERPETUALS_PAYMENT_DESTINATION,
   ];

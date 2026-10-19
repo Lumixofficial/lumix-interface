@@ -203,6 +203,9 @@ export async function preparePerpetualsTestnetPayment(
   marginInput: string,
   options: PaymentValidationOptions = {},
 ): Promise<TestnetPaymentPreview> {
+  if (LUMIX_STELLAR_NETWORK.id !== "testnet") {
+    throw new PaymentPreflightError("Perpetuals demo payments are available only on Stellar Testnet.");
+  }
   if (!StellarSdk.StrKey.isValidEd25519PublicKey(sourceAddress)) {
     throw new PaymentPreflightError("Connect a standard Stellar testnet account to continue.");
   }

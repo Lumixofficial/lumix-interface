@@ -26,6 +26,8 @@ import type {
 } from "./wallet-provider";
 import { LUMIX_PUBLIC_CONFIG } from "./runtime-config";
 import { LUMIX_STELLAR_NETWORK, walletAssetKey } from "./stellar-network";
+import { SPOT_NETWORKS, SPOT_MAINNET_USDC_ISSUER } from "./spot-network";
+import { circleTestnetUsdc } from "./spot-verified-assets.json";
 
 type LumixTheme = "dark" | "light";
 type WalletBalanceLine = {
@@ -36,14 +38,14 @@ type WalletBalanceLine = {
   selling_liabilities?: string;
 };
 
-function walletBalanceError(error: unknown) {
+function walletBalanceError(error: unknown, label: string) {
   if (!error) return "";
   const status = typeof error === "object" && "response" in error
     ? (error.response as { status?: unknown } | undefined)?.status
     : undefined;
-  if (status === 404) return "This wallet address is not funded on Stellar Testnet yet.";
+  if (status === 404) return `This wallet address is not funded on ${label} yet.`;
   const message = error instanceof Error ? error.message : String(error);
-  return message ? `The wallet balance could not be loaded on Stellar Testnet: ${message}` : "The wallet balance could not be loaded on Stellar Testnet.";
+  return message ? `The wallet balance could not be loaded on ${label}: ${message}` : `The wallet balance could not be loaded on ${label}.`;
 }
 
 const darkAppearance = {
@@ -114,7 +116,7 @@ function WalletController({ onStateChange }: { onStateChange: Dispatch<SetStateA
     {
       address,
       includeZeroBalances: true,
-      network: LUMIX_STELLAR_NETWORK.passphrase,
+      network: network || LUMIX_STELLAR_NETWORK.passphrase,
     },
     {
       enabled: isAuthenticated,
@@ -169,15 +171,17 @@ function WalletController({ onStateChange }: { onStateChange: Dispatch<SetStateA
       const issuer = balance.asset_type === "native" ? undefined : balance.asset_issuer;
       result.assetBalances[walletAssetKey(code, issuer)] = spendableBalance;
 
-      // Only the canonical testnet USDC trustline is allowed to populate the
+      // Only the canonical USDC trustline for this network can populate the
       // shared symbol balance. A same-symbol asset from another issuer cannot
       // be mistaken for spendable Lumix collateral.
-      if (code !== "USDC" || issuer === LUMIX_STELLAR_NETWORK.assets.USDC.issuer) {
+      const usdcIssuer = network === LUMIX_STELLAR_NETWORK.passphrase ? LUMIX_STELLAR_NETWORK.assets.USDC.issuer
+        : network === networks.mainnet ? SPOT_MAINNET_USDC_ISSUER : circleTestnetUsdc.issuer;
+      if (code !== "USDC" || issuer === usdcIssuer) {
         result.balances[code] = spendableBalance;
       }
       return result;
     }, { assetBalances: {}, balances: {} });
-  }, [balancesQuery.data, isAuthenticated]);
+  }, [balancesQuery.data, isAuthenticated, network]);
 
   const balanceStatus: BalanceStatus = !isAuthenticated
     ? "idle"
@@ -186,7 +190,7 @@ function WalletController({ onStateChange }: { onStateChange: Dispatch<SetStateA
       : balancesQuery.isError
         ? "error"
         : "success";
-  const balanceError = balanceStatus === "error" ? walletBalanceError(balancesQuery.error) : "";
+  const balanceError = balanceStatus === "error" ? walletBalanceError(balancesQuery.error, network === networks.mainnet ? "Stellar Mainnet" : "Stellar Testnet") : "";
 
   const connect = useCallback(async () => {
     if (!blux.isReady || blux.isAuthenticated || isConnecting) return;
@@ -282,12 +286,16 @@ export function BluxRuntime({ onStateChange, children }: { onStateChange: Dispat
   const config = useMemo<ComponentProps<typeof BluxProvider>["config"]>(() => ({
     appName: "Lumix",
     appId: LUMIX_PUBLIC_CONFIG.bluxAppId,
-    networks: [networks.testnet],
-    defaultNetwork: networks.testnet,
+    networks: [networks.testnet, networks.mainnet],
+    defaultNetwork: LUMIX_STELLAR_NETWORK.passphrase,
     transports: {
-      [LUMIX_STELLAR_NETWORK.passphrase]: {
-        horizon: LUMIX_STELLAR_NETWORK.horizonUrl,
-        soroban: LUMIX_STELLAR_NETWORK.sorobanRpcUrl,
+      [networks.mainnet]: {
+        horizon: SPOT_NETWORKS.mainnet.horizonUrl,
+        soroban: SPOT_NETWORKS.mainnet.sorobanRpcUrl,
+      },
+      [networks.testnet]: {
+        horizon: SPOT_NETWORKS.testnet.horizonUrl,
+        soroban: SPOT_NETWORKS.testnet.sorobanRpcUrl,
       },
     },
     explorer: LUMIX_STELLAR_NETWORK.explorer,

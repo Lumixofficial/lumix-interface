@@ -70,6 +70,37 @@
 .spot-workspace .receive-supporting-copy > span { min-width: 0; }
 .spot-workspace .receive-supporting-copy > span:last-child { text-align: right; }
 .spot-control-hidden { visibility: hidden; }
+.spot-network-select { display: flex; align-items: center; justify-content: space-between; gap: var(--trade-space-3); margin-bottom: var(--trade-space-4); color: var(--trade-text-secondary); font-size: var(--trade-type-small-size); }
+.spot-network-select select { min-height: 44px; max-width: 70%; padding: var(--trade-space-2) var(--trade-space-3); border: 1px solid var(--trade-border-default); border-radius: var(--trade-radius-control); background: var(--trade-bg-raised); color: var(--trade-text-primary); font: inherit; }
+.spot-quotes { margin-top: var(--trade-space-5); }
+.spot-quotes-head { display: flex; justify-content: space-between; align-items: baseline; gap: var(--trade-space-3); margin-bottom: var(--trade-space-2); }
+.spot-quotes-head h3 { margin: 0; color: var(--trade-text-primary); font-size: var(--trade-type-small-size); font-weight: 600; }
+.spot-quotes-head > span, .spot-quote-copy > span, .spot-quote-output > span { color: var(--trade-text-secondary); font-size: var(--trade-type-caption-size); }
+.spot-quote-option { border-bottom: 1px solid var(--trade-border-subtle); }
+.spot-quote-select { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: var(--trade-space-2); align-items: center; min-height: 64px; padding: var(--trade-space-3) var(--trade-space-2); cursor: pointer; }
+.spot-quote-option[data-selected="true"] .spot-quote-select { background: var(--trade-bg-raised); border-radius: var(--trade-radius-control); }
+.spot-quote-select:hover { background: var(--trade-hover-wash); }
+.spot-quote-select input { width: 16px; height: 16px; margin: 0; accent-color: var(--trade-accent); }
+.spot-quote-select:has(input:disabled) { cursor: not-allowed; }
+.spot-quote-copy, .spot-quote-output { display: grid; gap: var(--trade-space-1); min-width: 0; }
+.spot-quote-copy strong, .spot-quote-output strong { font-size: var(--trade-type-small-size); font-weight: 600; color: var(--trade-text-primary); overflow-wrap: anywhere; }
+.spot-quote-output { text-align: right; }
+.spot-quote-output > span { color: var(--trade-accent-text); }
+.spot-quote-option details > summary { display: flex; align-items: center; justify-content: space-between; min-height: 44px; padding-inline: var(--trade-space-2); color: var(--trade-text-secondary); font-size: var(--trade-type-caption-size); list-style: none; cursor: pointer; }
+.spot-quote-option details > summary::-webkit-details-marker { display: none; }
+.spot-quote-option details[open] > summary svg { transform: rotate(180deg); }
+.spot-route-detail { padding: var(--trade-space-2); font-size: var(--trade-type-caption-size); color: var(--trade-text-secondary); overflow-wrap: anywhere; }
+.spot-route-detail p { margin: 0 0 var(--trade-space-3); line-height: 1.6; }
+.spot-route-detail ol { display: grid; gap: var(--trade-space-2); margin: 0 0 var(--trade-space-3); padding: 0; list-style: none; }
+.spot-route-detail li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--trade-space-1) var(--trade-space-2); }
+.spot-route-detail li strong { color: var(--trade-text-primary); font-weight: 500; }
+.spot-route-detail li small { grid-column: 1 / -1; color: var(--trade-text-secondary); }
+.spot-route-leg + .spot-route-leg { padding-top: var(--trade-space-3); border-top: 1px solid var(--trade-border-subtle); }
+.spot-route-leg-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: var(--trade-space-2); margin-bottom: var(--trade-space-2); }
+.spot-route-leg-head strong { color: var(--trade-text-primary); }
+.spot-quote-notice { margin: var(--trade-space-3) 0 0; color: var(--trade-text-secondary); font-size: var(--trade-type-caption-size); line-height: 1.6; }
+.spot-quote-notice button { display: block; }
+.spot-workspace select:focus-visible, .spot-quote-select input:focus-visible, .spot-quote-option summary:focus-visible { outline: 2px solid var(--trade-accent-text); outline-offset: 3px; }
 .spot-quote-region { --spot-quote-height: 4rem; margin-top: var(--trade-space-3); min-height: var(--spot-quote-height); }
 .spot-quote-region .compact-route { margin-top: 0; }
 .spot-quote-region .compact-route-summary { min-height: calc(var(--spot-quote-height) - 2px); }
@@ -77,6 +108,9 @@
 .spot-workspace .swap-primary-wrap.is-expanded { margin-top: var(--trade-space-6); }
 .spot-workspace .swap-primary-wrap { transition: none; }
 @media (max-width: 600px) {
+  .spot-quotes-head { flex-wrap: wrap; }
+  .spot-quote-select { grid-template-columns: auto minmax(0, 1fr); }
+  .spot-quote-output { grid-column: 2; text-align: left; grid-template-columns: minmax(0, 1fr) auto; align-items: baseline; }
   [data-spot-review] .review-modal { padding: var(--trade-space-4) var(--trade-space-4) max(var(--trade-space-5), env(safe-area-inset-bottom)); }
   .spot-review-pair { gap: var(--trade-space-8); padding: var(--trade-space-4); }
   .spot-review-direction { width: 1.75rem; height: 1.75rem; }

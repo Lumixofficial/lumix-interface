@@ -49,4 +49,21 @@ for (const format of formats) {
   source += `\n${marker}\n${format.swap}.lumixSpotGuardVersion=2;\n${format.swap}.lumixWalletNetwork=async function(){const state=${format.store}();if(!state.authState.isAuthenticated||!state.user)throw new Error("Wallet is disconnected.");if(state.user.authMethod!=="wallet")return state.stellar?.activeNetwork;const wallet=state.wallets.find(w=>w.name===state.user.authValue);if(!wallet?.getNetwork)throw new Error("Cannot verify the wallet network.");return (await wallet.getNetwork()).passphrase};\n`;
   fs.writeFileSync(file, source);
 }
+// The API supplies the aggregator call unchanged. Guard the SDK's simulated
+// envelope too, and record its signed hash before a potentially ambiguous send.
+const contractMarker = '/* Lumix Soroban Spot guards: Blux 0.3.7 */';
+for (const format of formats) {
+  const file = path.join(root, 'dist', format.file);
+  let source = fs.readFileSync(file, 'utf8');
+  if (source.includes(contractMarker)) continue;
+  const esm = format.file === 'index.esm.js';
+  const before = esm ? 'm=a.assembleTransaction(f,p).build(),[2,kE(m.toXDR(),{network:i})]'
+    : 'p=e.rpc.assembleTransaction(f,h).build(),[2,GA(p.toXDR(),{network:o})]';
+  const after = esm
+    ? 'm=a.assembleTransaction(f,p).build(),[2,(async()=>{const xdr=m.toXDR();if(t.lumixBeforeSign)await t.lumixBeforeSign(xdr);return kE(xdr,{network:i,lumixBeforeSubmit:t.lumixBeforeSubmit})})()]'
+    : 'p=e.rpc.assembleTransaction(f,h).build(),[2,(async()=>{const xdr=p.toXDR();if(n.lumixBeforeSign)await n.lumixBeforeSign(xdr);return GA(xdr,{network:o,lumixBeforeSubmit:n.lumixBeforeSubmit})})()]';
+  if (source.split(before).length !== 2) throw new Error(`Unexpected Blux contract boundary in ${format.file}.`);
+  source = source.replace(before, after) + `\n${contractMarker}\n`;
+  fs.writeFileSync(file, source);
+}
 console.log('Blux 0.3.7 Spot guards ready.');

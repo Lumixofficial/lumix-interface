@@ -1,7 +1,7 @@
 "use client";
 import { useCallback, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { SPOT_TESTNET, spotCurrencyImage, spotHomeDomain, spotRead, type SpotAsset } from "./spot-utils";
+import { spotCurrencyImage, spotHomeDomain, spotRead, type SpotAsset } from "./spot-utils";
 
 export function SpotTokenIcon({ asset }: { asset: SpotAsset }) {
   // Local artwork also renders in the static card, before the query provider mounts.
@@ -11,15 +11,15 @@ export function SpotTokenIcon({ asset }: { asset: SpotAsset }) {
 function IssuerTokenImage({ asset }: { asset: SpotAsset }) {
   const cache = { staleTime: 3_600_000, gcTime: 3_600_000, retry: false, retryOnMount: false, refetchOnWindowFocus: false } as const;
   const issuer = useQuery({
-    ...cache, queryKey: ["lumix", "spot", "icon-issuer", SPOT_TESTNET, asset.issuer],
+    ...cache, queryKey: ["lumix", "spot", "icon-issuer", asset.network, asset.issuer],
     queryFn: async ({ signal }) => {
-      try { return await spotRead<{ account_id: string; home_domain?: string }>(`/accounts/${asset.issuer}`, signal); }
+      try { return await spotRead<{ account_id: string; home_domain?: string }>(`/accounts/${asset.issuer}`, signal, asset.network); }
       catch { return null; } // Cache missing/blocked optional metadata as well as successful lookups.
     },
   });
   const domain = issuer.data?.account_id === asset.issuer ? spotHomeDomain(issuer.data?.home_domain) : undefined;
   const metadata = useQuery({
-    ...cache, queryKey: ["lumix", "spot", "icon-metadata", SPOT_TESTNET, domain], enabled: Boolean(domain),
+    ...cache, queryKey: ["lumix", "spot", "icon-metadata", asset.network, domain], enabled: Boolean(domain),
     queryFn: async () => {
       try {
         const { StellarToml } = await import("@stellar/stellar-sdk");

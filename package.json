@@ -9,7 +9,7 @@
     "start": "next start",
     "typecheck": "tsc --noEmit",
     "lint:spot": "eslint components/spot-*.ts components/spot-*.tsx components/blux-runtime.tsx components/wallet-provider.tsx app/spot scripts/*.cjs",
-    "test:spot": "node --test tests/spot-model.test.cjs tests/spot-transaction.test.cjs",
+    "test:spot": "node --test tests/spot-model.test.cjs tests/spot-transaction.test.cjs tests/spot-api.test.cjs tests/stellar-network.test.cjs",
     "test:spot:browser": "playwright test --config=playwright.spot.config.cjs",
     "test:spot:testnet": "node scripts/verify-spot-testnet.cjs",
     "lint:earn": "eslint components/earn-*.ts components/earn-*.tsx components/app-routes.ts app/earn",

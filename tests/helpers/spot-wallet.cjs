@@ -1,7 +1,7 @@
 // Freighter protocol fixture for disposable Testnet accounts only. Private
 // keys stay in Node; each signing request requires a visible approval click.
 const { Networks, TransactionBuilder, hash } = require('@stellar/stellar-sdk');
-async function installSpotTestWallet(context, keypair) {
+async function installSpotTestWallet(context, keypair, { signingNetwork = Networks.TESTNET } = {}) {
   const address = keypair.publicKey();
   await context.exposeBinding('__spotWalletAction', async (_source, request) => {
     if (request.type === 'SUBMIT_BLOB') {
@@ -9,8 +9,8 @@ async function installSpotTestWallet(context, keypair) {
       return { signedBlob: Buffer.from(keypair.sign(hash(payload))).toString('base64'), signerAddress: address };
     }
     if (request.type === 'SUBMIT_TRANSACTION') {
-      if (request.networkPassphrase !== Networks.TESTNET) throw new Error('The disposable wallet refuses non-Testnet signing.');
-      const tx = TransactionBuilder.fromXDR(request.transactionXdr, Networks.TESTNET);
+      if (request.networkPassphrase !== signingNetwork) throw new Error('The disposable wallet refuses signing on a different network.');
+      const tx = TransactionBuilder.fromXDR(request.transactionXdr, signingNetwork);
       if (tx.source !== address) throw new Error('The disposable wallet refuses a different transaction source.');
       tx.sign(keypair);
       return { signedTransaction: tx.toXDR(), signerAddress: address };

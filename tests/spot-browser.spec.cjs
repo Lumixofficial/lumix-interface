@@ -11,6 +11,7 @@ const fakePath = (amount, output) => ({ _embedded: { records: [{ source_asset_ty
   destination_asset_type: 'credit_alphanum4', destination_asset_code: 'USDC', destination_asset_issuer: circleTestnetUsdc.issuer, destination_amount: output, path: [] }] } });
 
 test.beforeEach(async ({ page }) => {
+  await page.route('**/api/spot/quotes', route => route.fulfill({ json: { enabled: false } }));
   await page.route(horizon, route => route.fulfill({ json: { network_passphrase: 'Test SDF Network ; September 2015' } }));
   await page.route(horizon + '/ledgers?*', route => route.fulfill({ json: { _embedded: { records: [{ base_reserve_in_stroops: 5000000, base_fee_in_stroops: 100 }] } } }));
   await page.route(horizon + '/assets?*', route => route.fulfill({ json: { _embedded: { records: [] } } }));
@@ -39,6 +40,9 @@ test('empty defaults, decimal editing and paste validation never quote an untouc
   await input.fill('0'); await expect(output).toHaveText('-'); expect(calls).toBe(0);
   await input.blur(); await expect(page.locator('.spot-status')).toContainText('greater than zero');
   await input.fill('.5'); await expect(output).toHaveText('2.12');
+  await expect(page.getByRole('radio')).toHaveCount(1);
+  await expect(page.locator('.spot-quotes-head')).toHaveText('Swap quote1 quote');
+  await expect(page.locator('.spot-quotes')).not.toContainText('Soroban');
   await expect(input).toHaveValue('.5');
   await input.fill('12.345'); await input.evaluate(element => element.setSelectionRange(1, 2)); await input.press('9');
   await expect(input).toHaveValue('19.345');
@@ -251,7 +255,7 @@ test('empty path response terminates loading; an empty direct book never suppres
   });
   await page.locator('#pay-amount').fill('10');
   await expect(page.getByLabel('Estimated receive amount')).toHaveText('7.50');
-  await page.getByRole('button', { name: /Available execution path/ }).click();
+  await page.getByRole('button', { name: /Selected execution path/ }).click();
   await expect(page.locator('#route-details')).toContainText('XLM'); await expect(page.locator('#route-details')).toContainText('EURC');
   await expect(page.locator('#route-details')).not.toContainText(/Blux|orderbook|quote source/i);
 });
@@ -531,7 +535,11 @@ for (const width of [1440, 390]) for (const theme of ['dark', 'light']) {
     const geometry = () => page.evaluate(() => {
       const card = document.querySelector('.swap-ticket').getBoundingClientRect();
       const footer = document.querySelector('footer').getBoundingClientRect();
-      return { card: card.height, footer: footer.top + scrollY, overflow: document.documentElement.scrollWidth > innerWidth };
+      // Quote comparisons grow with the available routes. The surrounding
+      // ticket should retain its stable loading, result and error geometry.
+      const comparison = document.querySelector('.spot-quotes');
+      const comparisonHeight = comparison ? comparison.getBoundingClientRect().height + parseFloat(getComputedStyle(comparison).marginTop) : 0;
+      return { card: card.height - comparisonHeight, footer: footer.top + scrollY - comparisonHeight, overflow: document.documentElement.scrollWidth > innerWidth };
     });
     const stable = (actual, initial) => {
       expect(Math.abs(actual.card - initial.card), JSON.stringify({ initial, actual })).toBeLessThanOrEqual(1);

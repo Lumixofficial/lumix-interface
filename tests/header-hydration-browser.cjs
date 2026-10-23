@@ -83,7 +83,7 @@ const origin = process.env.LUMIX_TEST_ORIGIN ?? 'http://localhost:3000';
     await evaluate("document.querySelector('.account-control').click()");
     await sleep(100);
     const menuItems = await evaluate("Array.from(document.querySelectorAll('.account-menu-item')).map(item => item.textContent.trim())");
-    assert.deepEqual(menuItems, ['Portfolio', 'Wallet', 'Docs / How it works', 'Disconnect wallet']);
+    assert.deepEqual(menuItems, ['Portfolio', 'Wallet', 'Disconnect wallet']);
   };
 
   await call('Page.enable');

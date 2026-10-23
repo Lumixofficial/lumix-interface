@@ -241,15 +241,6 @@ button {
   color: var(--trade-text-muted);
 }
 
-.header-search kbd {
-  padding: 0.125rem 0.3rem;
-  border: 1px solid var(--trade-border-default);
-  border-radius: var(--trade-radius-xs);
-  background: var(--trade-bg-raised);
-  color: var(--trade-text-muted);
-  font: 0.625rem var(--trade-font-data);
-}
-
 .wallet-balance-control {
   min-height: 2.125rem;
   padding: 0 var(--trade-space-3);
@@ -4416,8 +4407,7 @@ button {
     padding: 0;
   }
 
-  .header-search span,
-  .header-search kbd {
+  .header-search span {
     display: none;
   }
 

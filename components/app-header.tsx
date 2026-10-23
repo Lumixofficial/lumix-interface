@@ -15,15 +15,15 @@ import { Icon } from "./icon";
 import { ThemeToggle } from "./theme-toggle";
 import { useAccessibleOverlay } from "./use-accessible-overlay";
 import { useWallet } from "./wallet-provider";
-import { LUMIX_STELLAR_NETWORK } from "./stellar-network";
 
-const accountItems = ["Portfolio", "Wallet", "Docs / How it works", "Disconnect wallet"] as const;
+const accountItems = ["Portfolio", "Wallet", "Disconnect wallet"] as const;
 
 export function AppHeader({ activeItem = "Spot" }: { activeItem?: ProductNavigationLabel | null }) {
   const router = useRouter();
-  const { address, balanceStatus, connect, disconnect, getBalance, isAuthenticated, isConnecting, isReady, openProfile } = useWallet();
+  const { address, connect, disconnect, isAuthenticated, isConnecting, isReady, mainnetUsdcBalance, mainnetUsdcBalanceStatus, openProfile } = useWallet();
   const [searchOpen, setSearchOpen] = useState(false);
   const [accountOpen, setAccountOpen] = useState(false);
+  const [menuAuthenticated, setMenuAuthenticated] = useState(isAuthenticated);
   const searchRef = useRef<HTMLInputElement>(null);
   const searchDialogRef = useRef<HTMLDivElement>(null);
   const accountWrapRef = useRef<HTMLDivElement>(null);
@@ -37,15 +37,18 @@ export function AppHeader({ activeItem = "Spot" }: { activeItem?: ProductNavigat
   }, []);
   const shortenedAddress = address && address.length > 12 ? `${address.slice(0, 5)}\u2026${address.slice(-4)}` : address ?? "";
   const compactAddress = address ? `${address.slice(0, 1)}\u2026` : "";
-  const usdcBalance = getBalance(
-    LUMIX_STELLAR_NETWORK.assets.USDC.code,
-    LUMIX_STELLAR_NETWORK.assets.USDC.issuer,
-  );
-  const balanceLabel = balanceStatus === "loading"
+  const balanceLabel = mainnetUsdcBalanceStatus === "loading"
     ? "… USDC"
-    : balanceStatus === "error" || usdcBalance === undefined
+    : mainnetUsdcBalanceStatus === "error" || mainnetUsdcBalance === undefined
       ? "— USDC"
-      : `${formatFinancial(usdcBalance)} USDC`;
+      : `${formatFinancial(mainnetUsdcBalance)} USDC`;
+
+  // A wallet can sign out outside this menu; close it so a later sign-in
+  // does not reopen a stale menu.
+  if (menuAuthenticated !== isAuthenticated) {
+    setMenuAuthenticated(isAuthenticated);
+    if (!isAuthenticated) setAccountOpen(false);
+  }
 
   useAccessibleOverlay(searchOpen, closeSearch, searchDialogRef);
 
@@ -93,10 +96,6 @@ export function AppHeader({ activeItem = "Spot" }: { activeItem?: ProductNavigat
     };
   }, [accountOpen]);
 
-  useEffect(() => {
-    if (!isAuthenticated) setAccountOpen(false);
-  }, [isAuthenticated]);
-
   function openAccountMenu(initialFocus: "first" | "last") {
     initialAccountFocusRef.current = initialFocus;
     setAccountOpen(true);
@@ -138,7 +137,6 @@ export function AppHeader({ activeItem = "Spot" }: { activeItem?: ProductNavigat
           <button className="header-search" type="button" onClick={openSearch} aria-label="Search markets, assets or contracts">
             <Icon name="search" size={15} />
             <span>Search markets, assets or contracts</span>
-            <kbd>{"\u2318K"}</kbd>
           </button>
 
           <div className="header-flex-spacer" aria-hidden="true" />
@@ -148,10 +146,10 @@ export function AppHeader({ activeItem = "Spot" }: { activeItem?: ProductNavigat
 
             {isAuthenticated && (
               <button
-                className={`wallet-balance-control${balanceStatus === "loading" ? " is-loading" : ""}`}
+                className={`wallet-balance-control${mainnetUsdcBalanceStatus === "loading" ? " is-loading" : ""}`}
                 type="button"
-                aria-label={`Open wallet profile. Available balance: ${balanceLabel}`}
-                aria-busy={balanceStatus === "loading"}
+                aria-label={`Open wallet profile. Stellar Mainnet balance: ${balanceLabel}`}
+                aria-busy={mainnetUsdcBalanceStatus === "loading"}
                 onClick={openProfile}
               >
                 <Icon name="wallet" size={14} />

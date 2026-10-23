@@ -47,13 +47,15 @@ function fixture(network, overrides = {}) {
 }
 
 for (const network of ['testnet', 'mainnet']) {
-  test(`${network} uses configured URLs and passphrase without contaminating the alternate network`, async () => {
+  test(`${network} uses configured URLs and passphrase without contaminating the alternate network, and Spot stays on Mainnet`, async () => {
     const f = fixture(network, { NEXT_PUBLIC_STELLAR_MAINNET_RPC_URL: 'https://alternate-mainnet-rpc.example' });
     const config = f.load('runtime-config').LUMIX_PUBLIC_CONFIG.stellar;
     const spot = f.load('spot-network');
-    const selected = spot.spotNetwork();
+    const selected = spot.spotNetwork(network);
     assert.equal(config.id, network);
-    assert.equal(spot.SPOT_DEFAULT_NETWORK, network);
+    assert.equal(spot.SPOT_NETWORK_ID, 'mainnet');
+    assert.equal(spot.spotNetwork(), spot.SPOT_NETWORK);
+    assert.equal(spot.SPOT_NETWORK.passphrase, sdk.Networks.PUBLIC);
     assert.equal(selected.passphrase, network === 'mainnet' ? sdk.Networks.PUBLIC : sdk.Networks.TESTNET);
     assert.equal(selected.horizonUrl, `https://${network}-horizon.example`);
     assert.equal(selected.sorobanRpcUrl, `https://${network}-rpc.example`);
@@ -72,8 +74,10 @@ for (const network of ['testnet', 'mainnet']) {
   });
 }
 
-test('missing network preserves Testnet and invalid network names fail configuration', () => {
-  assert.equal(fixture(undefined).load('spot-network').SPOT_DEFAULT_NETWORK, 'testnet');
+test('missing network preserves the Testnet app default, Spot stays on Mainnet, and invalid network names fail configuration', () => {
+  const f = fixture(undefined);
+  assert.equal(f.load('runtime-config').LUMIX_PUBLIC_CONFIG.stellar.id, 'testnet');
+  assert.equal(f.load('spot-network').SPOT_NETWORK.passphrase, sdk.Networks.PUBLIC);
   assert.throws(() => fixture('pubnet').load('runtime-config'), /NEXT_PUBLIC_STELLAR_NETWORK must be mainnet or testnet/);
 });
 

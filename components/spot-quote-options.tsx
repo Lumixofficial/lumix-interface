@@ -1,19 +1,43 @@
 "use client";
 
+import { type ReactNode, useState } from "react";
 import { Icon } from "./icon";
 import { formatSpotAmount, formatSpotFee } from "./spot-utils";
-import { spotProtocol, spotQuoteProtocols, type SpotCandidate } from "./spot-api";
+import { spotProtocol, spotQuoteProtocols, type SpotApiLeg, type SpotCandidate } from "./spot-api";
+
+const hopCount = (count: number) => `${count} ${count === 1 ? "hop" : "hops"}`;
+const legVenues = (leg: SpotApiLeg) => [...new Set(leg.hops.map(hop => spotProtocol(hop.protocol)))].join(" + ");
+
+// Stays mounted while closed so closing animates; inert keeps hidden content out of focus and the accessibility tree.
+export function SpotAccordion({ open, id, children }: { open: boolean; id: string; children: ReactNode }) {
+  return <div className="spot-accordion" id={id} data-open={open} inert={!open}><div>{children}</div></div>;
+}
+
+function SpotQuoteBreakdown({ quote }: { quote: SpotCandidate }) {
+  const api = quote.soroban;
+  const legs = api?.legs ?? [];
+  return <div className="spot-quote-breakdown">
+    {!api ? <p><strong className="trade-number">100%</strong> routed through Stellar native AMM &amp; order books across {hopCount(quote.route.length - 1)}.</p>
+      : legs.length === 1 ? <p><strong className="trade-number">100%</strong> routed through {legVenues(legs[0])} across {hopCount(legs[0].hops.length)}.</p>
+      : <>
+        <p>Split across {legs.length} routes through {spotQuoteProtocols(quote)}.</p>
+        <ul className="spot-quote-legs">{legs.map((leg, index) => <li key={`${leg.routeId}:${index}`}>
+          <strong className="trade-number">{leg.sharePct}%</strong>
+          <span>{legVenues(leg)} · {leg.pathSymbols.join(" → ")}</span>
+          <span>{hopCount(leg.hops.length)}</span>
+        </li>)}</ul>
+      </>}
+  </div>;
+}
 
 export function SpotRouteDetails({ quote }: { quote: SpotCandidate }) {
   const api = quote.soroban;
-  if (!api) return <div className="spot-route-detail"><p>Stellar native AMM / order book · {quote.route.length - 1} {quote.route.length === 2 ? "hop" : "hops"} · 100%</p>
-    <ol>{quote.route.slice(0, -1).map((asset, index) => <li key={`${asset.id}:${index}`}><span>Hop {index + 1}</span><strong>{asset.code} → {quote.route[index + 1].code}</strong></li>)}</ol>
-    <p>Stellar path payments can use liquidity pools and order book offers. The native quote does not identify the venue used for each hop.</p></div>;
+  if (!api) return null;
   return <div className="spot-route-detail">
     {api.legs.map((leg, index) => <section className="spot-route-leg" key={`${leg.routeId}:${index}`} aria-label={`Route ${index + 1}, ${leg.sharePct}%`}>
       <div className="spot-route-leg-head"><strong>{leg.sharePct}% allocation</strong><span>{formatSpotAmount(leg.amountIn)} {quote.request.from.code}</span></div>
       <p>{leg.pathSymbols.join(" → ")}</p>
-      <ol>{leg.hops.map((hop, i) => <li key={`${hop.poolAddress}:${i}`}><span>Hop {i + 1} · {spotProtocol(hop.protocol)}</span><strong>{leg.pathSymbols[i]} → {leg.pathSymbols[i + 1]}</strong><small title={hop.poolAddress}>Pool {hop.poolAddress.slice(0, 6)}…{hop.poolAddress.slice(-6)} · {hop.model}</small></li>)}</ol>
+      <ol>{leg.hops.map((hop, i) => <li key={`${hop.poolAddress}:${i}`}><span className="spot-route-hop-meta">Hop {i + 1} · {spotProtocol(hop.protocol)}</span><strong>{leg.pathSymbols[i]} → {leg.pathSymbols[i + 1]}</strong><small title={hop.poolAddress}>Pool {hop.poolAddress.slice(0, 6)}…{hop.poolAddress.slice(-6)} · {hop.model}</small></li>)}</ol>
       <p>Output {formatSpotAmount(leg.amountOut)} {quote.request.to.code} · Minimum {formatSpotAmount(leg.minimumReceived)} {quote.request.to.code}</p>
     </section>)}
     <dl className="trade-breakdown"><div className="trade-breakdown-row"><dt>Aggregator fee (included)</dt><dd>{api.feeBps / 100}% · {formatSpotFee(BigInt(api.feeAmountRaw))} {quote.request.to.code}</dd></div>
@@ -24,21 +48,35 @@ export function SpotRouteDetails({ quote }: { quote: SpotCandidate }) {
   </div>;
 }
 
-export function SpotQuoteOptions({ quotes, selected, onSelect, disabled, loading, error, onRetry, testnet, connected, apiEnabled }: {
+export function SpotQuoteOptions({ quotes, selected, onSelect, disabled, loading, error, onRetry, connected, apiEnabled }: {
   quotes: SpotCandidate[]; selected?: SpotCandidate; onSelect: (id: string) => void;
-  disabled: boolean; loading: boolean; error?: string; onRetry: () => void; testnet: boolean; connected: boolean; apiEnabled: boolean;
+  disabled: boolean; loading: boolean; error?: string; onRetry: () => void; connected: boolean; apiEnabled: boolean;
 }) {
+  const [expandedId, setExpandedId] = useState<string>();
   return <section className="spot-quotes" aria-labelledby="spot-quotes-title">
     <div className="spot-quotes-head"><h3 id="spot-quotes-title">{apiEnabled ? "Compare quotes" : "Swap quote"}</h3><span>{loading ? "Finding Soroban routes…" : `${quotes.length} ${quotes.length === 1 ? "quote" : "quotes"}`}</span></div>
-    <div role="radiogroup" aria-label="Swap quote" className="spot-quote-list">{quotes.map((quote, index) => <div className="spot-quote-option" data-selected={selected?.id === quote.id} key={quote.id}>
-      <label className="spot-quote-select"><input type="radio" name="spot-quote" value={quote.id} checked={selected?.id === quote.id} disabled={disabled} onChange={() => onSelect(quote.id)} />
-        <span className="spot-quote-copy"><strong>{spotQuoteProtocols(quote)}</strong><span>{quote.source === "native" ? "Native Stellar" : quote.soroban?.type === "split" ? `Soroban · Split across ${quote.soroban.legs.length} routes` : "Soroban"}{quote.soroban?.isEstimate ? " · Estimate" : ""}</span></span>
-        <span className="spot-quote-output"><strong className="trade-number" title={`${quote.output} ${quote.request.to.code}`}>{formatSpotAmount(quote.output)} {quote.request.to.code}</strong>{index === 0 && quotes.length > 1 && <span>Best output</span>}</span>
-      </label>
-      <details><summary>Route details <Icon name="chevron-down" size={14} /></summary><SpotRouteDetails quote={quote} /></details>
-    </div>)}</div>
-    {!apiEnabled ? null : testnet ? <p className="spot-quote-notice">Soroban quotes are available on Mainnet. Select Mainnet to compare both sources.</p>
-      : !connected ? <p className="spot-quote-notice">Connect your wallet to compare Soroban quotes.</p>
+    <div role="radiogroup" aria-label="Swap quote" className="spot-quote-list">{quotes.map((quote, index) => {
+      const checked = selected?.id === quote.id;
+      const expanded = checked && expandedId === quote.id;
+      const breakdownId = `spot-quote-breakdown-${index}`;
+      return <div className="spot-quote-option" data-selected={checked} data-expanded={expanded} key={quote.id}>
+        <div className="spot-quote-head">
+          <label className="spot-quote-choice" title={`${quote.output} ${quote.request.to.code}`}>
+            <input className="spot-quote-radio" type="radio" name="spot-quote" value={quote.id} checked={checked} disabled={disabled} onChange={() => { setExpandedId(undefined); onSelect(quote.id); }} />
+            <span className="spot-quote-mark" aria-hidden="true" />
+            <span className="spot-quote-copy"><strong>{spotQuoteProtocols(quote)}</strong><span>{quote.source === "native" ? "Native Stellar" : quote.soroban?.type === "split" ? `Soroban · Split across ${quote.soroban.legs.length} routes` : "Soroban"}{quote.soroban?.isEstimate ? " · Estimate" : ""}</span></span>
+            <span className="spot-quote-output"><strong className="trade-number">{formatSpotAmount(quote.output)} {quote.request.to.code}</strong>{index === 0 && quotes.length > 1 && <span>Best output</span>}</span>
+            <Icon className="spot-quote-chevron" name="chevron-down" size={16} />
+          </label>
+          {/* Once chosen, the whole card discloses its routing instead of re-selecting. */}
+          {checked && <button className="spot-quote-toggle" type="button" aria-expanded={expanded} aria-controls={breakdownId}
+            aria-label={`${expanded ? "Hide" : "Show"} routing breakdown for ${spotQuoteProtocols(quote)}`}
+            onClick={() => setExpandedId(expanded ? undefined : quote.id)} />}
+        </div>
+        {checked && <SpotAccordion open={expanded} id={breakdownId}><SpotQuoteBreakdown quote={quote} /></SpotAccordion>}
+      </div>;
+    })}</div>
+    {!apiEnabled ? null : !connected ? <p className="spot-quote-notice">Connect your wallet to compare Soroban quotes.</p>
       : error ? <div className="spot-quote-notice" role="status"><span>Soroban quotes unavailable: {error}</span><button className="spot-inline-action" type="button" disabled={disabled || loading} onClick={onRetry}>Retry Soroban quotes</button></div>
       : !loading && !quotes.some(quote => quote.source === "soroban") ? <p className="spot-quote-notice">No Soroban route for this amount. Try another amount or pair.</p> : null}
   </section>;

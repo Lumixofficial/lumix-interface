@@ -46,7 +46,11 @@ const socialLinks = [
   { label: "Discord", icon: <DiscordMark /> },
 ] as const;
 
-const footerLinks = ["Terms", "Privacy", "Docs / How it works"] as const;
+const footerLinks: { label: string; href: string; external?: boolean }[] = [
+  { label: "Terms", href: "#" },
+  { label: "Privacy", href: "#" },
+  { label: "Docs / How it works", href: "https://docs.lumixmarket.com/", external: true },
+];
 
 export function AppFooter() {
   return (
@@ -69,9 +73,14 @@ export function AppFooter() {
 
         <div className="app-footer-row app-footer-secondary">
           <nav className="app-footer-links" aria-label="Legal and documentation links">
-            {footerLinks.map((label) => (
-              <a className="app-footer-link" href="#" key={label}>
-                {label}
+            {footerLinks.map((link) => (
+              <a
+                className="app-footer-link"
+                href={link.href}
+                key={link.label}
+                {...(link.external ? { target: "_blank", rel: "noopener noreferrer" } : {})}
+              >
+                {link.label}
               </a>
             ))}
           </nav>

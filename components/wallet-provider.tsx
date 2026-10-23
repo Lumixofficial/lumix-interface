@@ -25,6 +25,8 @@ export type WalletContextValue = {
   isConnecting: boolean;
   isReady: boolean;
   isTestnet: boolean;
+  mainnetUsdcBalance?: number;
+  mainnetUsdcBalanceStatus: BalanceStatus;
   network: string;
   walletNetwork?: string;
   clearConnectionMessage: () => void;
@@ -44,7 +46,8 @@ const disconnectedWallet: WalletContextValue = {
   isAuthenticated: false,
   isConnecting: false,
   isReady: false,
-  isTestnet: true,
+  isTestnet: false,
+  mainnetUsdcBalanceStatus: "idle",
   network: "",
   clearConnectionMessage: () => undefined,
   connect: async () => undefined,

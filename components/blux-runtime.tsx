@@ -24,9 +24,10 @@ import type {
   WalletContextValue,
   WalletSubmittedTransaction,
 } from "./wallet-provider";
+import { APP_ROUTES } from "./app-routes";
 import { LUMIX_PUBLIC_CONFIG } from "./runtime-config";
 import { LUMIX_STELLAR_NETWORK, walletAssetKey } from "./stellar-network";
-import { SPOT_NETWORKS, SPOT_MAINNET_USDC_ISSUER } from "./spot-network";
+import { SPOT_NETWORK, SPOT_NETWORKS, SPOT_MAINNET_USDC_ISSUER } from "./spot-network";
 import { circleTestnetUsdc } from "./spot-verified-assets.json";
 
 type LumixTheme = "dark" | "light";
@@ -37,6 +38,15 @@ type WalletBalanceLine = {
   asset_issuer?: string;
   selling_liabilities?: string;
 };
+
+// Horizon includes open-offer commitments as selling liabilities. Subtract
+// those once to expose the amount the account can actually spend.
+function spendableBalance(line: WalletBalanceLine) {
+  const balance = Number(line.balance);
+  const sellingLiabilities = Number(line.selling_liabilities ?? 0);
+  if (!Number.isFinite(balance) || !Number.isFinite(sellingLiabilities)) return undefined;
+  return Math.max(0, balance - sellingLiabilities);
+}
 
 function walletBalanceError(error: unknown, label: string) {
   if (!error) return "";
@@ -129,6 +139,24 @@ function WalletController({ onStateChange }: { onStateChange: Dispatch<SetStateA
     },
   );
   const refetchBalances = balancesQuery.refetch;
+  // The header always reports Mainnet USDC, independent of the active network.
+  const mainnetBalancesQuery = useBalances(
+    {
+      address,
+      includeZeroBalances: true,
+      network: networks.mainnet,
+    },
+    {
+      enabled: isAuthenticated,
+      gcTime: 0,
+      refetchOnMount: "always",
+      refetchOnReconnect: "always",
+      refetchOnWindowFocus: "always",
+      retry: 1,
+      staleTime: 0,
+    },
+  );
+  const refetchMainnetBalances = mainnetBalancesQuery.refetch;
 
   useEffect(() => {
     // Authentication arrives asynchronously from the shared wallet store.
@@ -161,15 +189,10 @@ function WalletController({ onStateChange }: { onStateChange: Dispatch<SetStateA
       const code = balance.asset_type === "native" ? "XLM" : balance.asset_code?.toUpperCase();
       if (!code) return result;
 
-      const numericBalance = Number(balance.balance);
-      const sellingLiabilities = Number(balance.selling_liabilities ?? 0);
-      if (!Number.isFinite(numericBalance) || !Number.isFinite(sellingLiabilities)) return result;
-
-      // Horizon includes open-offer commitments as selling liabilities. Subtract
-      // those once to expose the amount the account can actually spend.
-      const spendableBalance = Math.max(0, numericBalance - sellingLiabilities);
+      const spendable = spendableBalance(balance);
+      if (spendable === undefined) return result;
       const issuer = balance.asset_type === "native" ? undefined : balance.asset_issuer;
-      result.assetBalances[walletAssetKey(code, issuer)] = spendableBalance;
+      result.assetBalances[walletAssetKey(code, issuer)] = spendable;
 
       // Only the canonical USDC trustline for this network can populate the
       // shared symbol balance. A same-symbol asset from another issuer cannot
@@ -177,11 +200,25 @@ function WalletController({ onStateChange }: { onStateChange: Dispatch<SetStateA
       const usdcIssuer = network === LUMIX_STELLAR_NETWORK.passphrase ? LUMIX_STELLAR_NETWORK.assets.USDC.issuer
         : network === networks.mainnet ? SPOT_MAINNET_USDC_ISSUER : circleTestnetUsdc.issuer;
       if (code !== "USDC" || issuer === usdcIssuer) {
-        result.balances[code] = spendableBalance;
+        result.balances[code] = spendable;
       }
       return result;
     }, { assetBalances: {}, balances: {} });
   }, [balancesQuery.data, isAuthenticated, network]);
+
+  const mainnetUsdcBalance = useMemo(() => {
+    if (!isAuthenticated || !mainnetBalancesQuery.data) return undefined;
+    const line = (mainnetBalancesQuery.data as WalletBalanceLine[]).find((balance) => balance.asset_type !== "native"
+      && balance.asset_code === "USDC" && balance.asset_issuer === SPOT_MAINNET_USDC_ISSUER);
+    return line ? spendableBalance(line) : undefined;
+  }, [isAuthenticated, mainnetBalancesQuery.data]);
+  const mainnetUsdcBalanceStatus: BalanceStatus = !isAuthenticated
+    ? "idle"
+    : mainnetBalancesQuery.isPending
+      ? "loading"
+      : mainnetBalancesQuery.isError
+        ? "error"
+        : "success";
 
   const balanceStatus: BalanceStatus = !isAuthenticated
     ? "idle"
@@ -218,6 +255,8 @@ function WalletController({ onStateChange }: { onStateChange: Dispatch<SetStateA
       balanceStatus: "idle",
       isAuthenticated: false,
       isConnecting: false,
+      mainnetUsdcBalance: undefined,
+      mainnetUsdcBalanceStatus: "idle",
     }));
     blux.logout();
   }, [blux, onStateChange]);
@@ -229,8 +268,8 @@ function WalletController({ onStateChange }: { onStateChange: Dispatch<SetStateA
 
   const refreshBalances = useCallback(async () => {
     if (!isAuthenticated) return;
-    await refetchBalances();
-  }, [isAuthenticated, refetchBalances]);
+    await Promise.all([refetchBalances(), refetchMainnetBalances()]);
+  }, [isAuthenticated, refetchBalances, refetchMainnetBalances]);
 
   const sendTransaction = useCallback(async (xdr: string): Promise<WalletSubmittedTransaction> => {
     if (!isAuthenticated) throw new Error("Wallet is not connected.");
@@ -258,6 +297,8 @@ function WalletController({ onStateChange }: { onStateChange: Dispatch<SetStateA
     isConnecting,
     isReady: providerReady,
     isTestnet,
+    mainnetUsdcBalance,
+    mainnetUsdcBalanceStatus,
     network,
     walletNetwork,
     clearConnectionMessage,
@@ -267,7 +308,7 @@ function WalletController({ onStateChange }: { onStateChange: Dispatch<SetStateA
     openProfile,
     refreshBalances,
     sendTransaction,
-  }), [address, balanceError, balanceStatus, balances, clearConnectionMessage, connect, connectionMessage, disconnect, getBalance, isAuthenticated, isConnecting, isTestnet, network, openProfile, providerReady, refreshBalances, sendTransaction, walletNetwork]);
+  }), [address, balanceError, balanceStatus, balances, clearConnectionMessage, connect, connectionMessage, disconnect, getBalance, isAuthenticated, isConnecting, isTestnet, mainnetUsdcBalance, mainnetUsdcBalanceStatus, network, openProfile, providerReady, refreshBalances, sendTransaction, walletNetwork]);
 
   useEffect(() => {
     onStateChange(walletState);
@@ -283,11 +324,16 @@ function WalletController({ onStateChange }: { onStateChange: Dispatch<SetStateA
 
 export function BluxRuntime({ onStateChange, children }: { onStateChange: Dispatch<SetStateAction<WalletContextValue>>; children: ReactNode }) {
   const theme = useLumixTheme();
+  // This runtime only loads in the browser. Booting a Spot page directly on
+  // Mainnet avoids a first render on the app-wide network before Spot switches.
+  const [defaultNetwork] = useState(() => window.location.pathname.startsWith(APP_ROUTES.spot)
+    ? SPOT_NETWORK.passphrase
+    : LUMIX_STELLAR_NETWORK.passphrase);
   const config = useMemo<ComponentProps<typeof BluxProvider>["config"]>(() => ({
     appName: "Lumix",
     appId: LUMIX_PUBLIC_CONFIG.bluxAppId,
     networks: [networks.testnet, networks.mainnet],
-    defaultNetwork: LUMIX_STELLAR_NETWORK.passphrase,
+    defaultNetwork,
     transports: {
       [networks.mainnet]: {
         horizon: SPOT_NETWORKS.mainnet.horizonUrl,
@@ -304,7 +350,7 @@ export function BluxRuntime({ onStateChange, children }: { onStateChange: Dispat
     isPersistent: false,
     loginMethods: ["wallet", "email", "google"],
     appearance: theme === "light" ? lightAppearance : darkAppearance,
-  }), [theme]);
+  }), [defaultNetwork, theme]);
 
   return (
     <BluxProvider config={config}>

@@ -1,7 +1,7 @@
 import { StrKey, extractBaseAddress, Transaction, TransactionBuilder } from "@stellar/stellar-sdk/base";
 import { circleTestnetUsdc, circleTestnetEurc, mainnetOnly } from "./spot-verified-assets.json";
 import tokenImages from "./spot-token-images.json";
-import { spotNetwork, type SpotNetworkId } from "./spot-network";
+import { SPOT_MAINNET_EURC_ISSUER, SPOT_MAINNET_USDC_ISSUER, SPOT_NETWORK_ID, spotNetwork, type SpotNetworkId } from "./spot-network";
 
 export const SPOT_TESTNET = "Test SDF Network ; September 2015";
 export const SPOT_SCALE = BigInt("10000000");
@@ -220,7 +220,7 @@ export function walletRejected(error: unknown) {
 }
 
 export const SPOT_CURATED_ASSETS: SpotAsset[] = [
-  spotAsset("XLM"), spotAsset("USDC", circleTestnetUsdc.issuer), spotAsset("EURC", circleTestnetEurc.issuer)
+  spotAsset("XLM", undefined, SPOT_NETWORK_ID), spotAsset("USDC", SPOT_MAINNET_USDC_ISSUER, SPOT_NETWORK_ID), spotAsset("EURC", SPOT_MAINNET_EURC_ISSUER, SPOT_NETWORK_ID),
 ];
 export function mergeSpotAssets(...groups: SpotAsset[][]) {
   const map = new Map<string, SpotAsset>();

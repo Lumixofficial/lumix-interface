@@ -1,14 +1,15 @@
 "use client";
 
-import { Asset, getState, swap, useAssets, useBlux, useNetwork, useStrictSendPaths, useSwap, useWriteContract, switchNetwork, type SwapOptions } from "@bluxcc/react";
-import { useIsMutating, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Asset, useAssets, useBlux, useNetwork, useStrictSendPaths, switchNetwork } from "@bluxcc/react";
+import { useIsMutating, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { SPOT_NETWORK, SPOT_NETWORK_ID } from "./spot-network";
 import { LUMIX_STELLAR_NETWORK } from "./stellar-network";
-import { fetchSpotApiEnabled, fetchSpotApiQuotes, spotCandidates, spotQuoteProtocols, type SpotCandidate } from "./spot-api";
+import { fetchSpotApiEnabled, fetchSpotApiQuotes, spotApiRefreshMs, spotCandidateMinimum, spotCandidates, spotQuoteProtocols } from "./spot-api";
 import { SpotAccordion, SpotQuoteOptions, SpotRouteDetails } from "./spot-quote-options";
-import { inspectSorobanSpotEnvelope, sorobanSpotValidation, SOROBAN_SPOT_FEE_CAP } from "./spot-soroban";
+import { sorobanSpotValidation, SOROBAN_SPOT_FEE_CAP } from "./spot-soroban";
+import { executeSpotSwap, spotWalletNetwork, type SpotSwapReview } from "./spot-execution";
 import { Icon } from "./icon";
 import { SpotAssetSelector, spotIssuerLabel } from "./spot-asset-selector";
 import { SpotTokenIcon } from "./spot-token-icon";
@@ -18,27 +19,21 @@ import { useHydrated } from "./use-hydrated";
 import { useWallet } from "./wallet-provider";
 import {
   SPOT_CURATED_ASSETS, SPOT_QUOTE_REFRESH_MS, BLUX_SWAP_FEE_PER_OPERATION,
-  availableAsset, baseAccount, bluxAsset, formatSpotAmount, formatSpotFee, inspectSpotEnvelope,
-  mergeSpotAssets, minimumReceived, parseSlippage, parseSpotAmount, quoteFromPaths, slippageFraction,
+  availableAsset, baseAccount, formatSpotAmount, formatSpotQuoteAmount, formatSpotFee,
+  mergeSpotAssets, parseSlippage, parseSpotAmount, quotesFromPaths,
   SpotHttpError, spotAsset, spotDecimal, spotError, spotLedgerParameters, spotRate, spotRead,
-  spotRequestKey, spotRequirements, spotTransactionUrl, spotValidation, verifySignedSpotEnvelope,
-  verifySpotNetwork, walletRejected, type SpotAccount, type SpotAsset,
+  spotRequestKey, spotRequirements, spotTransactionUrl, spotValidation,
+  walletRejected, type SpotAccount, type SpotAsset,
   type SpotQuote, type SpotReceipt, type SpotRequest,
 } from "./spot-utils";
 
 const swapKey = ["lumix", "spot", "swap"];
 // Retain only the submitted identity for confirmation recovery after navigation
-// or a lost HTTP response. Mutation progress belongs to useSwap.
+// or a lost HTTP response. Mutation progress belongs to React Query.
 const pendingKey = ["lumix", "spot", "submitted"];
 type PendingSwap = { hash: string; account: string; expiresAt: number; asset: SpotAsset; source?: "native" | "soroban" };
 const transactionKey = (hash?: string) => ["lumix", "spot", "transaction", hash];
 
-type GuardedSwap = SwapOptions & { lumixBeforeSign: (xdr: string) => Promise<void>; lumixBeforeSubmit: (signedXdr: string) => Promise<void> };
-async function actualWalletNetwork() {
-  const compatibility = swap as typeof swap & { lumixSpotGuardVersion?: number; lumixWalletNetwork?: () => Promise<string> };
-  if (compatibility.lumixSpotGuardVersion !== 2 || !compatibility.lumixWalletNetwork) throw new Error("Spot cannot verify its wallet integration. Reload the page or contact support before swapping.");
-  return compatibility.lumixWalletNetwork();
-}
 type TransactionRecord = { hash: string; successful: boolean; fee_charged: string; ledger: number; received?: string };
 async function readTransaction(hash: string): Promise<TransactionRecord | null> {
   try {
@@ -52,16 +47,6 @@ async function readTransaction(hash: string): Promise<TransactionRecord | null> 
 }
 const native = Asset.native();
 function sdkAsset(asset?: SpotAsset) { return !asset || asset.kind === "native" ? native : new Asset(asset.code, asset.issuer!); }
-function assertWallet(account: string, passphrase: string) {
-  const state = getState();
-  if (!state.authState.isAuthenticated || !state.user || baseAccount(state.user.address) !== account) throw new Error("The connected account changed. Review this swap again.");
-  if (state.stellar?.activeNetwork !== passphrase) throw new Error("Switch the wallet to Stellar Mainnet before approving this swap.");
-}
-async function assertCurrentWallet(account: string, passphrase: string) {
-  assertWallet(account, passphrase);
-  if (await actualWalletNetwork() !== passphrase) throw new Error("Switch the wallet to Stellar Mainnet before approving this swap.");
-  assertWallet(account, passphrase);
-}
 
 export function SpotWorkspace() {
   // Switch before paint so the ticket never renders against the app-wide
@@ -86,7 +71,7 @@ function SpotTrading() {
   const [slippageOpen, setSlippageOpen] = useState(false); const [feesExpanded, setFeesExpanded] = useState(false);
   const [routeExpanded, setRouteExpanded] = useState(false);
   const [dialog, setDialog] = useState<"closed" | "review" | "execution">("closed");
-  const [review, setReview] = useState<{ quote: SpotCandidate; bps: number; fee: bigint } | null>(null);
+  const [review, setReview] = useState<SpotSwapReview | null>(null);
   const [inputError, setInputError] = useState("");
   const dialogRef = useRef<HTMLElement>(null); const titleRef = useRef<HTMLHeadingElement>(null);
   const queryClient = useQueryClient();
@@ -124,7 +109,7 @@ function SpotTrading() {
   // Only typing is debounced; the initial pair and asset changes can load now.
   const request = amount === debouncedAmount ? currentRequest : null;
   const walletNetworkQuery = useQuery({
-    queryKey: ["lumix", "spot", "wallet-network", address, blux.user?.authValue], queryFn: actualWalletNetwork,
+    queryKey: ["lumix", "spot", "wallet-network", address, blux.user?.authValue, blux.user?.walletPassphrase], queryFn: spotWalletNetwork,
     enabled: connected, staleTime: 0, retry: false, refetchInterval: connected ? 3000 : false,
     refetchOnWindowFocus: "always", refetchOnReconnect: "always",
   });
@@ -135,8 +120,7 @@ function SpotTrading() {
   });
   const validNetwork = blux.isReady && network === SPOT_NETWORK.passphrase && walletOnNetwork && networkQuery.isSuccess && !networkQuery.isError;
   const canReadNetwork = blux.isReady && network === SPOT_NETWORK.passphrase;
-  // Blux 0.3.7 swallows account/balance HTTP errors as null/[]; the strict
-  // account query preserves 404 versus transport failure and supplies reserves.
+  // Preserve 404 versus transport failure and read the account's reserves.
   const accountQuery = useQuery({
     queryKey: ["lumix", "spot", "account", SPOT_NETWORK.passphrase, address],
     queryFn: async () => {
@@ -179,11 +163,11 @@ function SpotTrading() {
     previousAccount.current = address;
     if (canReadNetwork && validRequest && !busy && !uncertain) void refetchPaths({ cancelRefetch: false });
   }, [address, canReadNetwork, validRequest, busy, uncertain, refetchPaths]);
-  const quoteResult = useMemo<{ quote?: SpotQuote; error?: unknown }>(() => {
+  const quoteResult = useMemo<{ quotes?: SpotQuote[]; error?: unknown }>(() => {
     if (uncertain || !validNetwork || !validRequest || !request || !paths.data || paths.isError
       || !currentRequest || spotRequestKey(currentRequest) !== spotRequestKey(request)) return {};
     const enriched = { ...request, to: { ...request.to, authRequired: metadata.data?.response.records[0]?.flags.auth_required } };
-    try { return { quote: quoteFromPaths(paths.data.response.records, enriched) ?? undefined }; }
+    try { return { quotes: quotesFromPaths(paths.data.response.records, enriched) }; }
     catch (error) { return { error }; }
   }, [uncertain, currentRequest, validNetwork, validRequest, request, paths.data, paths.isError, metadata.data]);
   const apiConfig = useQuery({
@@ -192,10 +176,11 @@ function SpotTrading() {
   });
   const apiEnabled = apiConfig.data === true && !apiConfig.isError;
   const apiQuotes = useQuery({
-    queryKey: ["lumix", "spot", "soroban-quotes", currentRequest ? spotRequestKey(currentRequest) : null, bps],
+    queryKey: ["lumix", "spot", "soroban-quotes", request ? spotRequestKey(request) : null, bps],
     queryFn: ({ signal }) => fetchSpotApiQuotes(request!, bps!, SPOT_NETWORK.passphrase, signal),
-    enabled: apiEnabled && validNetwork && validRequest && Boolean(request?.account && bps) && !busy && !uncertain,
-    retry: false, staleTime: SPOT_QUOTE_REFRESH_MS, refetchInterval: SPOT_QUOTE_REFRESH_MS,
+    enabled: apiEnabled && validNetwork && validRequest && (!connected || Boolean(address)) && Boolean(bps) && !busy && !uncertain,
+    retry: false, staleTime: SPOT_QUOTE_REFRESH_MS,
+    refetchInterval: query => query.state.status === "error" ? SPOT_QUOTE_REFRESH_MS : spotApiRefreshMs(query.state.data),
     refetchIntervalInBackground: false, refetchOnWindowFocus: true,
   });
   const [now, setNow] = useState(() => Date.now());
@@ -207,10 +192,10 @@ function SpotTrading() {
   const [selection, setSelection] = useState<{ key: string; id: string }>();
   const selectionKey = `${currentRequest ? spotRequestKey(currentRequest) : ""}|${bps}|${apiEnabled}`;
   const quotes = currentRequest && validNetwork && request && spotRequestKey(request) === spotRequestKey(currentRequest)
-    ? spotCandidates(quoteResult.quote, apiEnabled && !apiQuotes.isError ? apiQuotes.data : undefined, currentRequest, now) : [];
+    ? spotCandidates(quoteResult.quotes, apiEnabled && !apiQuotes.isError ? apiQuotes.data : undefined, currentRequest, bps ?? 30, now) : [];
   const quote = selection?.key === selectionKey ? quotes.find(item => item.id === selection.id) : quotes[0];
   // Spot moves Blux to Mainnet itself, so a different app network is a switch
-  // in progress. Only the wallet's own resolved network can be "wrong".
+  // in progress. A different wallet session network is "wrong".
   const networkSettled = hydrated && blux.isReady && network === SPOT_NETWORK.passphrase;
   const networkStatus = !networkSettled || (connected && walletNetworkQuery.isPending) ? "checking"
     : walletNetworkQuery.isSuccess && !walletOnNetwork ? "wrong"
@@ -225,23 +210,28 @@ function SpotTrading() {
     : quotes.length ? "choose" : paths.isError || quoteResult.error ? "error" : "no-route";
   const quoteError = paths.error || quoteResult.error ? spotError(paths.error ?? quoteResult.error) : "The native quote request failed. Change the amount or try again shortly.";
   const quoteLoading = Boolean(currentRequest && !quote && (networkStatus === "checking" || (networkStatus === "ready" && ["idle", "loading"].includes(quoteStatus))));
-  const quoteUpdating = Boolean(quote && (quote.source === "native" ? paths.isFetching || paths.isStale : apiQuotes.isFetching || apiQuotes.isStale));
+  const quoteUpdating = Boolean(quote && (apiConfig.isPending || apiEnabled && apiQuotes.isFetching
+    || (quote.source === "native" ? paths.isFetching || paths.isStale : apiQuotes.isStale)));
   const assets = useMemo(() => mergeSpotAssets(SPOT_CURATED_ASSETS, held, imported), [held, imported]);
   const refetchAccount = accountQuery.refetch;
   const refreshSharedBalances = wallet.refreshBalances;
   const refetchNetwork = networkQuery.refetch;
   const refetchWalletNetwork = walletNetworkQuery.refetch;
   const refetchApiQuotes = apiQuotes.refetch;
-  const refresh = useCallback(async () => {
+  const refresh = async () => {
     const [parameters, currentNetwork] = await Promise.all([refetchNetwork(), address ? refetchWalletNetwork() : undefined]);
     if (!parameters.isSuccess || network !== SPOT_NETWORK.passphrase || (currentNetwork && (!currentNetwork.isSuccess || currentNetwork.data !== SPOT_NETWORK.passphrase))) return;
     await Promise.allSettled([
       ...(address ? [refetchAccount(), refreshSharedBalances()] : []),
       ...(validRequest ? [refetchPaths({ cancelRefetch: false })] : []),
-      ...(apiEnabled && validRequest && address && bps ? [refetchApiQuotes({ cancelRefetch: false })] : []),
+      ...(apiEnabled && validRequest && bps ? [refetchApiQuotes({ cancelRefetch: false })] : []),
     ]);
-  }, [refetchNetwork, refetchWalletNetwork, network, address, bps, refetchAccount, refreshSharedBalances, validRequest, refetchPaths, refetchApiQuotes, apiEnabled]);
-  const swapMutation = useSwap({
+  };
+  const runSwap = (review: SpotSwapReview) => executeSpotSwap(review, blux.signTransaction, checked => {
+    queryClient.setQueryData<PendingSwap>(pendingKey, { ...checked, account: review.quote.request.account!, asset: review.quote.request.to, source: review.quote.source });
+  });
+  const swapMutation = useMutation({
+    mutationFn: runSwap,
     mutationKey: swapKey, retry: false,
     onMutate: () => { queryClient.setQueryData(pendingKey, null); },
     onSuccess: async result => {
@@ -266,7 +256,8 @@ function SpotTrading() {
       } catch { /* The confirmation query and Check status remain available. */ }
     },
   });
-  const contractMutation = useWriteContract<{ amount_out: bigint }>({
+  const contractMutation = useMutation({
+    mutationFn: runSwap,
     mutationKey: swapKey, retry: false,
     onMutate: () => { queryClient.setQueryData(pendingKey, null); },
     onSuccess: async result => {
@@ -305,7 +296,7 @@ function SpotTrading() {
   const maxNative = requirements && quote?.source === "soroban" && pay.kind === "native" ? requirements.max + requirements.fee - SOROBAN_SPOT_FEE_CAP : requirements?.max;
   const balance = maxNative !== undefined ? (maxNative > BigInt(0) ? maxNative : BigInt(0)) : account ? availableAsset(account, pay) : undefined;
   const receiveBalance = account ? availableAsset(account, receive) : undefined;
-  const minimum = quote && bps ? quote.soroban?.minimumReceived ?? minimumReceived(quote.output, bps) : undefined;
+  const minimum = quote && bps ? spotCandidateMinimum(quote, bps) : undefined;
   const executionError = review?.quote.source === "soroban" ? contractMutation.error : swapMutation.error;
   const stage = dialog === "review" ? "review" : busy ? submitted ? "pending" : "wallet"
     : receipt ? "confirmed" : uncertain ? "unconfirmed" : walletRejected(executionError) ? "cancelled" : "failed";
@@ -334,53 +325,9 @@ function SpotTrading() {
   function execute() {
     if (!review?.quote.request.account || !ready || busy || uncertain || queryClient.isMutating({ mutationKey: swapKey })) return;
     if (!currentRequest || spotRequestKey(currentRequest) !== review.quote.key) { close(); return; }
-    const source = review.quote.request.account;
-    let checked: { hash: string; expiresAt: number } | undefined;
-    if (review.quote.source === "soroban" && review.quote.soroban) {
-      const selected = review.quote;
-      const options = {
-        network: SPOT_NETWORK.passphrase,
-        lumixBeforeSign: async (xdr: string) => {
-          const [, current, parameters] = await Promise.all([
-            assertCurrentWallet(source, SPOT_NETWORK.passphrase), spotRead<SpotAccount>(`/accounts/${source}`, undefined, SPOT_NETWORK_ID), spotLedgerParameters(SPOT_NETWORK_ID),
-          ]);
-          const error = sorobanSpotValidation(current, selected, parameters.reserve);
-          if (error) throw new Error(error);
-          checked = inspectSorobanSpotEnvelope(xdr, selected);
-        },
-        lumixBeforeSubmit: async (signedXdr: string) => {
-          await Promise.all([verifySpotNetwork(SPOT_NETWORK_ID), assertCurrentWallet(source, SPOT_NETWORK.passphrase)]);
-          if (!checked) throw new Error("The aggregator envelope was not checked. Submission is blocked.");
-          verifySignedSpotEnvelope(signedXdr, checked, Date.now(), SPOT_NETWORK_ID);
-          queryClient.setQueryData<PendingSwap>(pendingKey, { ...checked, account: source, asset: selected.request.to, source: "soroban" });
-        },
-      };
-      setDialog("execution");
-      contractMutation.mutate({ call: review.quote.soroban.txData, options });
-      return;
-    }
-    const options: GuardedSwap = {
-      fromAsset: bluxAsset(review.quote.request.from), toAsset: bluxAsset(review.quote.request.to), amount: review.quote.request.amount,
-      type: "exactIn", slippage: slippageFraction(review.bps), network: SPOT_NETWORK.passphrase,
-      lumixBeforeSign: async xdr => {
-        const [, current, parameters] = await Promise.all([
-          assertCurrentWallet(source, SPOT_NETWORK.passphrase), spotRead<SpotAccount>(`/accounts/${source}`, undefined, SPOT_NETWORK_ID), spotLedgerParameters(SPOT_NETWORK_ID),
-        ]);
-        const error = spotValidation(current, review.quote.request, parameters.reserve, review.quote.output);
-        if (error) throw new Error(error);
-        const inspection = inspectSpotEnvelope(xdr, review.quote, review.bps, current, parameters.reserve);
-        if (inspection.fee > review.fee) throw new Error("The network fee changed. Review the swap again.");
-        checked = inspection;
-      },
-      lumixBeforeSubmit: async signedXdr => {
-        await Promise.all([verifySpotNetwork(SPOT_NETWORK_ID), assertCurrentWallet(source, SPOT_NETWORK.passphrase)]);
-        if (!checked) throw new Error("The swap envelope was not checked. Submission is blocked.");
-        verifySignedSpotEnvelope(signedXdr, checked, Date.now(), SPOT_NETWORK_ID);
-        queryClient.setQueryData<PendingSwap>(pendingKey, { ...checked, account: source, asset: review.quote.request.to });
-      },
-    };
     setDialog("execution");
-    swapMutation.swap(options);
+    if (review.quote.source === "soroban") contractMutation.mutate(review);
+    else swapMutation.mutate(review);
   }
   const assetDetailsReady = receive.kind === "native" || metadata.isSuccess;
   const ready = Boolean(quote && quoteStatus === "ready" && !quoteUpdating && assetDetailsReady && !validation && !amountError && !inputError && bps && accountStatus === "ready" && networkStatus === "ready");
@@ -423,13 +370,13 @@ function SpotTrading() {
       </div>
         <button className="swap-direction-button" type="button" disabled={busy || uncertain} onClick={() => { setPay(receive); setReceive(pay); }} aria-label={`Reverse ${pay.code} and ${receive.code}`}><Icon name="arrow-down" size={18} /></button>
         <div className="asset-amount-card receive-card"><div className="amount-card-meta"><span className="amount-card-label">Receive</span>{wallet.isAuthenticated && <span className="amount-card-balance">Wallet <strong className="trade-number">{balanceLabel(receiveBalance)} {receive.code}</strong></span>}</div>
-          <div className="amount-card-main"><output className={`amount-output${quote ? "" : " is-unavailable"}`} aria-label="Estimated receive amount" aria-busy={quoteLoading || quoteUpdating}>{quote ? formatSpotAmount(quote.output) : quoteLoading ? <SpotValueSkeleton>0,000.00</SpotValueSkeleton> : "-"}</output><SpotAssetSelector label="Choose receive asset" value={receive} assets={assets} canDiscover={validNetwork} disabled={busy || uncertain} onChange={asset => changeAsset("receive", asset)} /></div>
+          <div className="amount-card-main"><output className={`amount-output${quote ? "" : " is-unavailable"}`} aria-label="Estimated receive amount" aria-busy={quoteLoading || quoteUpdating}>{quote ? formatSpotQuoteAmount(quote.output) : quoteLoading ? <SpotValueSkeleton>0,000.00</SpotValueSkeleton> : "-"}</output><SpotAssetSelector label="Choose receive asset" value={receive} assets={assets} canDiscover={validNetwork} disabled={busy || uncertain} onChange={asset => changeAsset("receive", asset)} /></div>
           <div className="amount-card-footer receive-supporting-copy"><span title={receive.issuer}>{spotIssuerLabel(receive)}</span><span>{quote ? `1 ${pay.code} = ${spotRate(quote.output, quote.request.amount)} ${receive.code}` : quoteLoading ? <SpotValueSkeleton>1 {pay.code} = 0.00 {receive.code}</SpotValueSkeleton> : "Rate unavailable"}</span></div>
         </div>
       </div>
-      {currentRequest && <SpotQuoteOptions quotes={quotes} selected={quote} disabled={busy || uncertain} loading={apiEnabled && apiQuotes.isFetching} apiEnabled={apiEnabled}
-        error={apiEnabled && apiQuotes.isError ? spotError(apiQuotes.error) : undefined} connected={connected}
-        onSelect={id => { setSelection({ key: selectionKey, id }); setRouteExpanded(false); }} onRetry={() => { if (apiEnabled) void refetchApiQuotes(); }} />}
+      {currentRequest && <SpotQuoteOptions quotes={quotes} selected={quote} bps={bps ?? 30} disabled={busy || uncertain} loading={apiConfig.isPending || apiEnabled && apiQuotes.isFetching} apiEnabled={apiEnabled || apiConfig.isError}
+        error={apiConfig.isError ? spotError(apiConfig.error) : apiEnabled && apiQuotes.isError ? spotError(apiQuotes.error) : undefined} connected={connected}
+        onSelect={id => { setSelection({ key: selectionKey, id }); setRouteExpanded(false); }} onRetry={() => { if (apiConfig.isError) void apiConfig.refetch(); else if (apiEnabled) void refetchApiQuotes(); }} />}
       {selection?.key === selectionKey && !quote && quotes.length > 0 && <p className="spot-quote-notice" role="status">Your selected quote is no longer available. Choose a quote to continue.</p>}
       {quote?.source === "soroban" && apiQuotes.data?.meta.warnings.map((warning, index) => <p className="spot-quote-notice" key={index}>{warning}</p>)}
       <div className="spot-quote-region" aria-busy={quoteLoading || quoteUpdating}>
@@ -448,9 +395,9 @@ function SpotTrading() {
       <div className="spot-transaction-info">
       <div className="fee-disclosure"><button className="fee-summary-toggle" type="button" aria-expanded={feesExpanded} aria-controls="spot-transaction-details" onClick={() => setFeesExpanded(value => !value)}><span>Transaction details</span><Icon name="chevron-down" size={17} className={feesExpanded ? "is-rotated" : ""} /></button>
         {feesExpanded && <dl className="trade-breakdown fee-detail-rows" id="spot-transaction-details">
-          <div className="trade-breakdown-row"><dt>Minimum received</dt><dd>{minimum ? formatSpotAmount(minimum) + " " + receive.code : quoteLoading ? <SpotValueSkeleton>0,000.00 {receive.code}</SpotValueSkeleton> : "—"}</dd></div>
+          <div className="trade-breakdown-row"><dt>Minimum received</dt><dd>{minimum ? formatSpotQuoteAmount(minimum) + " " + receive.code : quoteLoading ? <SpotValueSkeleton>0,000.00 {receive.code}</SpotValueSkeleton> : "—"}</dd></div>
           <div className="trade-breakdown-row"><dt>Slippage</dt><dd>{bps ? bps / 100 + "%" : "—"}</dd></div>
-          <div className="trade-breakdown-row"><dt>Quoted output</dt><dd>{quote ? formatSpotAmount(quote.output) + " " + receive.code : quoteLoading ? <SpotValueSkeleton>0,000.00 {receive.code}</SpotValueSkeleton> : "—"}</dd></div>
+          <div className="trade-breakdown-row"><dt>Quoted output</dt><dd>{quote ? formatSpotQuoteAmount(quote.output) + " " + receive.code : quoteLoading ? <SpotValueSkeleton>0,000.00 {receive.code}</SpotValueSkeleton> : "—"}</dd></div>
           <div className="trade-breakdown-row"><dt>Network fee limit</dt><dd>{networkStatus === "checking" ? <SpotValueSkeleton>Up to 0.02 XLM</SpotValueSkeleton> : <>Up to {formatSpotFee(feeCap)} XLM</>}</dd></div>
         </dl>}
       </div>
@@ -468,13 +415,13 @@ function SpotTrading() {
             {index === 1 && <span className="spot-review-direction" aria-hidden="true"><Icon name="arrow-down" size={18} /></span>}
             <div className="spot-review-leg">
               <span className="spot-review-label">{index === 0 ? "You pay" : "You receive"}</span>
-              <strong className="spot-review-amount trade-number">{index === 1 ? "≈ " : ""}{formatSpotAmount(index === 0 ? review.quote.request.amount : review.quote.output)}</strong>
+              <strong className="spot-review-amount trade-number">{index === 1 ? "≈ " : ""}{formatSpotQuoteAmount(index === 0 ? review.quote.request.amount : review.quote.output)}</strong>
               <div className="spot-review-token"><SpotTokenIcon asset={asset} /><div><strong>{asset.code}</strong><span>{asset.name}</span></div></div>
               <span className="spot-review-issuer" title={asset.issuer}>{spotIssuerLabel(asset)}</span>
             </div>
           </Fragment>)}
         </div>
-          <dl className="trade-breakdown review-breakdown"><div className="trade-breakdown-row"><dt>Route</dt><dd>{spotQuoteProtocols(review.quote)}</dd></div><div className="trade-breakdown-row"><dt>Minimum received</dt><dd>{formatSpotAmount(review.quote.soroban?.minimumReceived ?? minimumReceived(review.quote.output, review.bps))} {review.quote.request.to.code}</dd></div><div className="trade-breakdown-row"><dt>Slippage</dt><dd>{review.bps / 100}%</dd></div><div className="trade-breakdown-row"><dt>Network fee limit</dt><dd>Up to {formatSpotFee(review.fee)} XLM</dd></div><div className="trade-breakdown-row trade-breakdown-row--total"><dt>Network</dt><dd>{SPOT_NETWORK.label}</dd></div></dl>
+          <dl className="trade-breakdown review-breakdown"><div className="trade-breakdown-row"><dt>Route</dt><dd>{spotQuoteProtocols(review.quote)}</dd></div><div className="trade-breakdown-row"><dt>Minimum received</dt><dd>{formatSpotQuoteAmount(spotCandidateMinimum(review.quote, review.bps))} {review.quote.request.to.code}</dd></div><div className="trade-breakdown-row"><dt>Slippage</dt><dd>{review.bps / 100}%</dd></div><div className="trade-breakdown-row"><dt>Network fee limit</dt><dd>Up to {formatSpotFee(review.fee)} XLM</dd></div><div className="trade-breakdown-row trade-breakdown-row--total"><dt>Network</dt><dd>{SPOT_NETWORK.label}</dd></div></dl>
           {review.quote.soroban && <><SpotRouteDetails quote={review.quote} /><p className="spot-quote-notice">Network fee is calculated during simulation, capped at 1 XLM. Aggregator fee is included in the quoted output.</p></>}
           {review.quote.soroban && Date.parse(review.quote.soroban.expiresAt) <= (now) + 5000 && <p className="spot-quote-notice" role="status">This quote expired. Close and select a fresh quote.</p>}
           <div className="review-actions"><button className="trade-button trade-button--secondary" type="button" onClick={close}>Cancel</button><button className="trade-button trade-button--primary" type="button" disabled={busy || uncertain || !ready || Boolean(review.quote.soroban && Date.parse(review.quote.soroban.expiresAt) <= now + 5000)} onClick={execute}>Swap {review.quote.request.from.code} for {review.quote.request.to.code}<Icon name="chevron-right" size={16} /></button></div>

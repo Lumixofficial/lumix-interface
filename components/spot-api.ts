@@ -1,5 +1,5 @@
 import { Asset, StrKey } from "@stellar/stellar-sdk/base";
-import { parseSpotAmount, spotDecimal, spotRequestKey, type SpotQuote, type SpotRequest } from "./spot-utils";
+import { SPOT_QUOTE_REFRESH_MS, minimumReceived, parseSpotAmount, spotDecimal, spotRequestKey, spotRouteKey, type SpotQuote, type SpotRequest } from "./spot-utils";
 
 export type SpotApiHop = {
   poolAddress: string; tokenIn: string; tokenOut: string; protocol: string; model: string;
@@ -31,18 +31,22 @@ export type SpotApiResponse = {
   };
 };
 export type SpotCandidate = SpotQuote & { id: string; source: "native" | "soroban"; soroban?: SpotApiQuote };
+export const spotCandidateMinimum = (quote: SpotCandidate, bps: number) => quote.soroban?.minimumReceived ?? minimumReceived(quote.output, bps);
 const protocols: Record<string, string> = { soroswap: "Soroswap", aquarius: "Aquarius", phoenix: "Phoenix", sushi: "Sushi", comet: "Comet" };
+// Quotes need a sender to encode txData. Public previews never have a wallet
+// account and cannot execute; connecting changes the query key and sender.
+const previewSender = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+const quoteSender = (request: SpotRequest) => request.account ?? previewSender;
 export const spotProtocol = (name: string) => protocols[name] ?? name;
-export const spotQuoteProtocols = (quote: SpotCandidate) => quote.soroban
-  ? [...new Set(quote.soroban.legs.flatMap(leg => leg.hops.map(hop => spotProtocol(hop.protocol))))].join(" + ")
-  : "Stellar AMM / order book";
+export const spotQuoteProtocols = (quote: SpotCandidate) => quote.source === "native" ? "Stellar AMM / order book"
+  : quote.soroban ? [...new Set(quote.soroban.legs.flatMap(leg => leg.hops.map(hop => spotProtocol(hop.protocol))))].join(" + ")
+  : "Protocol unavailable";
 export function spotApiBody(request: SpotRequest, bps: number) {
-  if (!request.account) throw new Error("Connect your wallet to compare Soroban quotes.");
   return {
     assetIn: request.from.kind === "native" ? "native" : `${request.from.code}:${request.from.issuer}`,
     assetOut: request.to.kind === "native" ? "native" : `${request.to.code}:${request.to.issuer}`,
-    mode: "exact-in", amount: request.amount, sender: request.account,
-    options: { slippageBps: bps, quoteLimit: 10, split: true },
+    mode: "exact-in", amount: request.amount, sender: quoteSender(request),
+    options: { slippageBps: bps, quoteLimit: 10, split: true, maxPoolAgeMs: 60_000 },
   };
 }
 export function validateSpotApiResponse(value: SpotApiResponse, request: SpotRequest, bps: number, passphrase: string, now = Date.now()) {
@@ -61,7 +65,7 @@ export function validateSpotApiResponse(value: SpotApiResponse, request: SpotReq
     const call = quote.txData, args = call?.args?.[0];
     if (!quote.id || ids.has(quote.id) || quote.mode !== "exact-in" || !args || call.args.length !== 1
       || !StrKey.isValidContract(call.address) || call.fn !== "swap_exact_in"
-      || args.sender !== request.account || (args.recipient !== null && args.recipient !== request.account)
+      || args.sender !== quoteSender(request) || (args.recipient !== null && args.recipient !== quoteSender(request))
       || args.token_in !== input || args.token_out !== output || args.amount !== quote.amountInRaw
       || args.limit !== quote.minimumReceivedRaw || args.fee_bps !== quote.feeBps
       || parseSpotAmount(quote.amountIn) !== parseSpotAmount(request.amount) || parseSpotAmount(quote.amountIn) !== BigInt(quote.amountInRaw)
@@ -94,6 +98,11 @@ export function validateSpotApiResponse(value: SpotApiResponse, request: SpotReq
   }
   return { ...value, data: value.data.filter(quote => Date.parse(quote.expiresAt) > now + 5000) };
 }
+export function spotApiRefreshMs(value: SpotApiResponse | undefined, now = Date.now()) {
+  if (!value?.data.length) return SPOT_QUOTE_REFRESH_MS;
+  const expires = Math.min(...value.data.map(quote => Date.parse(quote.expiresAt)));
+  return Math.max(1000, Math.min(SPOT_QUOTE_REFRESH_MS, expires - now - 10_000));
+}
 export async function fetchSpotApiEnabled(signal?: AbortSignal): Promise<boolean> {
   const response = await fetch("/api/spot/quotes", { cache: "no-store", signal });
   if (!response.ok) throw new Error("Quote configuration is unavailable.");
@@ -109,15 +118,19 @@ export async function fetchSpotApiQuotes(request: SpotRequest, bps: number, pass
   if (!response.ok) throw new Error(value.error?.message ?? "Soroban quotes are unavailable. Retry shortly.");
   return validateSpotApiResponse(value, request, bps, passphrase);
 }
-export function spotCandidates(native: SpotQuote | undefined, api: SpotApiResponse | undefined, request: SpotRequest, now = Date.now()): SpotCandidate[] {
+export function spotCandidates(native: SpotQuote | SpotQuote[] | undefined, api: SpotApiResponse | undefined, request: SpotRequest, bps = 30, now = Date.now()): SpotCandidate[] {
   const key = spotRequestKey(request);
-  const quotes: SpotCandidate[] = native?.key === key ? [{ ...native, source: "native", id: "native" }] : [];
+  const bestNative = (Array.isArray(native) ? native : native ? [native] : []).filter(quote => quote.key === key)
+    .reduce<SpotQuote | undefined>((best, quote) => !best || parseSpotAmount(quote.output) > parseSpotAmount(best.output) ? quote : best, undefined);
+  // Horizon paths share the same native operation and do not identify a
+  // Soroban protocol. Contribute only their best quote to venue comparison.
+  const quotes: SpotCandidate[] = bestNative ? [{ ...bestNative, source: "native", id: `native:${spotRouteKey(bestNative)}` }] : [];
   for (const quote of api?.data ?? []) {
-    if (Date.parse(quote.expiresAt) <= now + 5000) continue;
+    if (Date.parse(quote.expiresAt) <= now + 5000 || quote.txData.args[0].sender !== quoteSender(request)) continue;
     quotes.push({ key, request, output: spotDecimal(BigInt(quote.amountOutRaw)), route: [request.from, request.to], source: "soroban", id: `soroban:${quote.id}`, soroban: quote });
   }
   return quotes.sort((a, b) => {
-    const delta = parseSpotAmount(b.output) - parseSpotAmount(a.output);
+    const delta = parseSpotAmount(spotCandidateMinimum(b, bps)) - parseSpotAmount(spotCandidateMinimum(a, bps));
     return delta > BigInt(0) ? 1 : delta < BigInt(0) ? -1 : 0;
   });
 }

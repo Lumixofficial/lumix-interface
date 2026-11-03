@@ -104,7 +104,7 @@
 .spot-quote-copy, .spot-quote-output { display: grid; gap: var(--trade-space-1); min-width: 0; }
 .spot-quote-copy strong, .spot-quote-output strong { font-size: var(--trade-type-small-size); font-weight: 600; color: var(--trade-text-primary); overflow-wrap: anywhere; }
 .spot-quote-output { text-align: right; }
-.spot-quote-output > span { color: var(--trade-accent-text); }
+.spot-quote-copy > .spot-quote-best { color: var(--trade-accent-text); }
 .spot-route-detail { padding: var(--trade-space-2); font-size: var(--trade-type-caption-size); color: var(--trade-text-secondary); overflow-wrap: anywhere; }
 .spot-route-detail p { margin: 0 0 var(--trade-space-3); line-height: 1.6; }
 .spot-route-detail ol { display: grid; gap: var(--trade-space-2); margin: 0 0 var(--trade-space-3); padding: 0; list-style: none; }
@@ -138,10 +138,12 @@
   .spot-workspace .asset-select { flex: 0 0 auto; }
   .spot-inline-action { min-height: 44px; padding-inline: var(--trade-space-3); }
 }
-@media (max-width: 359px) {
+@media (max-width: 479px) {
   .spot-quote-choice { grid-template-columns: auto minmax(0, 1fr) 1rem; }
-  .spot-quote-output { grid-column: 2; grid-row: 2; text-align: left; grid-template-columns: minmax(0, 1fr) auto; align-items: baseline; }
+  .spot-quote-output { grid-column: 2; grid-row: 2; display: flex; flex-wrap: wrap; gap: var(--trade-space-1) var(--trade-space-3); text-align: left; align-items: baseline; }
   .spot-quote-chevron { grid-column: 3; grid-row: 1 / span 2; }
+}
+@media (max-width: 359px) {
   .spot-quote-legs li { grid-template-columns: 3rem minmax(0, 1fr); }
   .spot-quote-legs li > span:last-child { grid-column: 2; }
   .spot-review-pair { grid-template-columns: minmax(0, 1fr); gap: var(--trade-space-2); }

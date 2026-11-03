@@ -19,8 +19,35 @@ test('API request preserves exact asset identities, wallet, amount and user slip
   const body = api.spotApiBody(request, 30);
   assert.equal(body.assetIn, 'native'); assert.equal(body.assetOut, 'USDC:' + issuer);
   assert.equal(body.sender, address); assert.equal(body.amount, '100'); assert.equal(body.options.slippageBps, 30);
-  assert.throws(() => api.spotApiBody({ ...request, account: undefined }, 30), /wallet/);
+  assert.equal(body.options.maxPoolAgeMs, 60000);
   assert.notEqual(m.spotRequestKey(request), m.spotRequestKey({ ...request, from: m.spotAsset('XLM') }));
+});
+test('public previews load without a wallet and cannot be reused for a connected account', () => {
+  const preview = { ...request, account: undefined };
+  const body = api.spotApiBody(preview, 30);
+  assert.ok(require('@stellar/stellar-sdk').StrKey.isValidEd25519PublicKey(body.sender));
+  assert.notEqual(body.sender, address);
+  const result = api.validateSpotApiResponse(spotApiFixture(body.sender), preview, 30, Networks.PUBLIC);
+  const [quote] = api.spotCandidates(undefined, result, preview);
+  assert.equal(quote.request.account, undefined);
+  assert.equal(quote.soroban.txData.args[0].sender, body.sender);
+  assert.equal(api.spotCandidates(undefined, result, request).length, 0);
+  assert.throws(() => api.validateSpotApiResponse(result, request, 30, Networks.PUBLIC));
+  assert.throws(() => soroban.inspectSorobanSpotEnvelope(envelope(quote).toXDR(), quote), /does not match/);
+  const connected = api.validateSpotApiResponse(response(), request, 30, Networks.PUBLIC);
+  assert.equal(api.spotCandidates(undefined, connected, request).length, 1);
+  assert.equal(api.spotCandidates(undefined, connected, preview).length, 0);
+});
+test('Soroban quotes refresh before expiry, including short-lived responses', () => {
+  const value = response(), now = Date.now();
+  const withExpiry = ms => { value.data[0].expiresAt = new Date(now + ms).toISOString(); return value; };
+  assert.equal(api.spotApiRefreshMs(undefined, now), 30000);
+  assert.equal(api.spotApiRefreshMs({ data: [] }, now), 30000);
+  assert.equal(api.spotApiRefreshMs(withExpiry(60000), now), 30000);
+  assert.equal(api.spotApiRefreshMs(withExpiry(20000), now), 10000);
+  assert.equal(api.spotApiRefreshMs(withExpiry(7000), now), 1000);
+  value.data.push({ ...value.data[0], expiresAt: new Date(now + 11000).toISOString() });
+  assert.equal(api.spotApiRefreshMs(withExpiry(60000), now), 1000);
 });
 test('valid split quotes retain API txData, protocols, allocations and hop paths', () => {
   const result = api.validateSpotApiResponse(response(), request, 30, Networks.PUBLIC);
@@ -33,12 +60,30 @@ test('valid split quotes retain API txData, protocols, allocations and hop paths
   fractionalExpiry.data[0].expiresAt = new Date(Date.parse(fractionalExpiry.data[0].expiresAt) + 999).toISOString();
   assert.doesNotThrow(() => api.validateSpotApiResponse(fractionalExpiry, request, 30, Networks.PUBLIC));
 });
-test('native and Soroban candidates rank by integer net output without losing precision', () => {
+test('native and Soroban candidates rank by integer minimum received without losing precision', () => {
   const native = { key: m.spotRequestKey(request), request, route: [request.from, request.to], output: '102.0000001' };
   assert.deepEqual(api.spotCandidates(native, response(), request).map(quote => quote.source), ['native', 'soroban']);
   native.output = '101.9999999';
   assert.deepEqual(api.spotCandidates(native, response(), request).map(quote => quote.source), ['soroban', 'native']);
   assert.equal(api.spotCandidates(native, undefined, { ...request, amount: '101' }).length, 0);
+});
+test('a stronger API minimum wins even when the native estimate is higher; slippage changes the comparison', () => {
+  const native = { key: m.spotRequestKey(request), request, route: [request.from, request.to], output: '102.1' };
+  const value = response();
+  value.data[0].minimumReceived = '101.9'; value.data[0].minimumReceivedRaw = '1019000000';
+  value.data[0].txData.args[0].limit = '1019000000';
+  const checked = api.validateSpotApiResponse(value, request, 30, Networks.PUBLIC);
+  assert.equal(api.spotCandidates(native, checked, request, 30)[0].source, 'soroban');
+  assert.equal(api.spotCandidates(native, checked, request, 1)[0].source, 'native');
+  assert.equal(api.spotCandidateMinimum(api.spotCandidates(native, checked, request, 30)[0], 30), '101.9');
+});
+test('only the best native operation quote is listed, while API quotes keep their protocol names', () => {
+  const native = output => ({ key: m.spotRequestKey(request), request, route: [request.from, request.to], output });
+  const quotes = api.spotCandidates([native('99'), native('103'), native('100')], response(), request);
+  assert.equal(quotes.length, 2);
+  assert.equal(quotes.filter(quote => api.spotQuoteProtocols(quote) === 'Stellar AMM / order book').length, 1);
+  assert.equal(quotes.find(quote => quote.source === 'native').output, '103');
+  assert.equal(api.spotQuoteProtocols(quotes.find(quote => quote.source === 'soroban')), 'Soroswap + Aquarius');
 });
 test('network, account, slippage and call tampering are rejected; expired quotes disappear', () => {
   const mutations = [v => v.meta.network = 'testnet', v => v.meta.slippageBps = 50,

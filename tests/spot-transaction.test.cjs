@@ -3,10 +3,21 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const ts = require('typescript');
+const Module = require('node:module');
+const path = require('node:path');
 const { Account, Asset, Keypair, Networks, Operation, TransactionBuilder, Memo } = require('@stellar/stellar-sdk');
 require.extensions['.ts'] = (module, filename) => module._compile(ts.transpileModule(fs.readFileSync(filename, 'utf8'),
   { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText, filename);
 const m = require('../components/spot-utils.ts');
+const executionPath = require.resolve('../components/spot-execution.ts');
+const executionModule = new Module(executionPath, module);
+executionModule.filename = executionPath;
+executionModule.paths = Module._nodeModulePaths(path.dirname(executionPath));
+const executionRequire = executionModule.require.bind(executionModule);
+executionModule.require = id => id === '@bluxcc/react' ? { StellarSdk: require('@stellar/stellar-sdk') } : executionRequire(id);
+executionModule._compile(ts.transpileModule(fs.readFileSync(executionPath, 'utf8'),
+  { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText, executionPath);
+const { buildNativeSpotEnvelope, verifySpotSignature } = executionModule.exports;
 const { inspectSpotEnvelope, spotEnvelopeHash, verifySignedSpotEnvelope } = require('../components/spot-utils.ts');
 const trader = Keypair.random(); const stranger = Keypair.random();
 const to = m.spotAsset('USDC', m.CIRCLE_TESTNET_USDC);
@@ -32,6 +43,10 @@ test('the final Blux envelope can add one receiving trustline and keeps the revi
 test('a re-quote may improve protection but cannot weaken it even by a single stroop', () => {
   assert.doesNotThrow(() => inspectSpotEnvelope(build({ minimum: '9.6' }).toXDR(), quote, 30, account, reserve));
   assert.throws(() => inspectSpotEnvelope(build({ minimum: '9.4714999' }).toXDR(), quote, 30, account, reserve), /weaken/);
+});
+test('a native envelope cannot substitute a different selected path even with a stronger minimum', () => {
+  const selected = { ...quote, route: [quote.request.from, m.spotAsset('OTHER', stranger.publicKey()), to] };
+  assert.throws(() => inspectSpotEnvelope(build({ minimum: '9.6' }).toXDR(), selected, 30, account, reserve), /selected Stellar path changed/);
 });
 
 test('existing trustlines are reused and native receiving never adds a trustline', () => {
@@ -77,12 +92,26 @@ test('same XDR signed for Mainnet cannot produce a valid Testnet signature', () 
   const asTestnet = TransactionBuilder.fromXDR(tx.toXDR(), Networks.TESTNET);
   assert.equal(trader.verify(asTestnet.hash(), tx.signatures[0].signature), false);
 });
-test('the installed compatibility hook is version pinned and keeps original builders and wallet submission', () => {
-  const script = fs.readFileSync(require.resolve('../scripts/patch-blux-spot.cjs'), 'utf8');
-  assert.match(script, /pkg.version !== '0.3.7'/); assert.match(script, /refusing to patch an unknown Blux build/);
-  for (const file of ['index.esm.js', 'index.cjs.js']) {
-    const source = fs.readFileSync(require.resolve('@bluxcc/core').replace(/index\.[^.]+\.js$/, file), 'utf8');
-    assert.match(source, /lumixSpotGuardVersion=2/); assert.match(source, /await lumixBeforeSubmit\(signed\)/);
-    assert.match(source, /lumixWalletNetwork=async function/);
-  }
+test('native construction preserves the selected path, reviewed minimum and receiving trustline', () => {
+  const bridge = m.spotAsset('OTHER', stranger.publicKey());
+  const selected = { ...quote, route: [quote.request.from, bridge, to] };
+  const records = [{ source_asset_type: 'native', source_amount: '10', destination_asset_type: 'credit_alphanum4',
+    destination_asset_code: to.code, destination_asset_issuer: to.issuer, destination_amount: '9.5',
+    path: [{ asset_type: 'credit_alphanum4', asset_code: bridge.code, asset_issuer: bridge.issuer }] }];
+  const xdr = buildNativeSpotEnvelope({ quote: selected, bps: 30 }, { ...account, sequence: '1' }, records);
+  const tx = TransactionBuilder.fromXDR(xdr, Networks.TESTNET);
+  assert.deepEqual(tx.operations.map(operation => operation.type), ['changeTrust', 'pathPaymentStrictSend']);
+  assert.deepEqual(tx.operations[1].path.map(asset => asset.code), ['OTHER']);
+  assert.equal(inspectSpotEnvelope(xdr, selected, 30, account, reserve).minimum, '9.4715000');
+  assert.throws(() => buildNativeSpotEnvelope({ quote: selected, bps: 30 }, { ...account, sequence: '1' }, []), /no longer available/);
+  assert.throws(() => buildNativeSpotEnvelope({ quote: selected, bps: 30 }, { ...account, sequence: '1' }, [{ ...records[0], destination_amount: '9.4' }]), /quote changed/);
+});
+test('signature validation rejects unsigned, wrong-account and wrong-network wallet responses', () => {
+  const valid = build(); valid.sign(trader);
+  assert.doesNotThrow(() => verifySpotSignature(valid.toXDR(), account, Networks.TESTNET));
+  assert.throws(() => verifySpotSignature(build().toXDR(), account, Networks.TESTNET), /no valid signature/);
+  const wrongAccount = build(); wrongAccount.sign(stranger);
+  assert.throws(() => verifySpotSignature(wrongAccount.toXDR(), account, Networks.TESTNET), /no valid signature/);
+  const wrongNetwork = build({ network: Networks.PUBLIC }); wrongNetwork.sign(trader);
+  assert.throws(() => verifySpotSignature(wrongNetwork.toXDR(), account, Networks.TESTNET), /no valid signature/);
 });

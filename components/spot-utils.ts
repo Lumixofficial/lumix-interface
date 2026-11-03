@@ -6,7 +6,7 @@ import { SPOT_MAINNET_EURC_ISSUER, SPOT_MAINNET_USDC_ISSUER, SPOT_NETWORK_ID, sp
 export const SPOT_TESTNET = "Test SDF Network ; September 2015";
 export const SPOT_SCALE = BigInt("10000000");
 export const SPOT_MAX_AMOUNT = BigInt("9223372036854775807");
-// Verified against @bluxcc/core 0.3.7's classic swap builder, not BASE_FEE.
+// Native swap fee cap in stroops per operation.
 export const BLUX_SWAP_FEE_PER_OPERATION = BigInt("100000");
 export const SPOT_QUOTE_REFRESH_MS = 30_000;
 export const CIRCLE_TESTNET_USDC = circleTestnetUsdc.issuer;
@@ -94,6 +94,14 @@ export function formatSpotAmount(value: string | bigint) {
     return `${units < BigInt("0") ? "−" : ""}${whole}.${(cents % BigInt("100")).toString().padStart(2, "0")}`;
   } catch { return "—"; }
 }
+// Quote limits must stay visible down to one stroop and must never be rounded
+// up beyond the amount the transaction actually protects.
+export function formatSpotQuoteAmount(value: string | bigint) {
+  try {
+    const [whole, fraction = ""] = spotDecimal(typeof value === "bigint" ? value : parseSpotAmount(value)).split(".");
+    return `${whole.replace(/\B(?=(\d{3})+(?!\d))/g, ",")}.${fraction.padEnd(2, "0")}`;
+  } catch { return "—"; }
+}
 export function formatSpotFee(value: string | bigint) {
   const units = typeof value === "bigint" ? value : parseSpotAmount(value);
   return units > BigInt("0") && units < BigInt("100000") ? "<0.01" : formatSpotAmount(units);
@@ -117,9 +125,8 @@ export function spotAssetSearch(query: string, assets: SpotAsset[]) {
 export function slippageFraction(bps: number) {
   if (!Number.isInteger(bps) || bps < 1 || bps > 500) throw new Error("Choose slippage between 0.01% and 5%.");
   const fraction = bps / 10_000;
-  // Blux 0.3.7 converts (1 - slippage) from a binary Number to BigNumber.
-  // Nudge only a rounding undershoot toward stronger protection; its builder
-  // must never produce a minimum below the precise value shown in the review.
+  // Keep callers that use a decimal fraction from weakening integer limits
+  // through binary rounding. Envelope minimums use integer basis points.
   return 1 - fraction < (10_000 - bps) / 10_000 ? fraction - Number.EPSILON : fraction;
 }
 export function minimumReceived(output: string, bps: number) {
@@ -165,17 +172,44 @@ function pathAsset(record: { asset_type: string; asset_code?: string; asset_issu
   if (!["native", "credit_alphanum4", "credit_alphanum12"].includes(record.asset_type)) throw new Error("The quote contains an unsupported asset type.");
   return record.asset_type === "native" ? spotAsset("XLM", undefined, network) : spotAsset(record.asset_code ?? "", record.asset_issuer, network);
 }
-export function chooseSpotPath(records: SpotPathRecord[], request: SpotRequest): SpotPathRecord | undefined {
+function validSpotPaths(records: SpotPathRecord[], request: SpotRequest): SpotPathRecord[] {
   const valid = records.filter(record => {
     try {
       return pathAsset({ asset_type: record.source_asset_type, asset_code: record.source_asset_code, asset_issuer: record.source_asset_issuer }, request.from.network).id === request.from.id
         && pathAsset({ asset_type: record.destination_asset_type, asset_code: record.destination_asset_code, asset_issuer: record.destination_asset_issuer }, request.to.network).id === request.to.id
         && parseSpotAmount(record.source_amount) === parseSpotAmount(request.amount) && parseSpotAmount(record.destination_amount) > BigInt("0")
-        && record.path.every(asset => Boolean(pathAsset(asset, request.from.network)));
+        && Array.isArray(record.path) && record.path.length <= 5 && record.path.every(asset => Boolean(pathAsset(asset, request.from.network)));
     } catch { return false; }
   });
-  // Match the installed Blux builder's M_: prefer its first <=1-hop path.
-  return valid.find(record => record.path.length < 2) ?? valid[0];
+  return valid.sort((a, b) => {
+    const delta = parseSpotAmount(b.destination_amount) - parseSpotAmount(a.destination_amount);
+    return delta > BigInt(0) ? 1 : delta < BigInt(0) ? -1 : 0;
+  });
+}
+export function chooseSpotPath(records: SpotPathRecord[], request: SpotRequest): SpotPathRecord | undefined {
+  return validSpotPaths(records, request)[0];
+}
+export const spotRouteKey = (quote: SpotQuote) => quote.route.map(asset => asset.id).join(">");
+export function quotesFromPaths(records: SpotPathRecord[], request: SpotRequest): SpotQuote[] {
+  const seen = new Set<string>();
+  const valid = validSpotPaths(records, request);
+  if (records.length && !valid.length) throw new Error("The quote did not match the selected assets or amount. Change the amount to request a new quote.");
+  return valid.flatMap(path => {
+    const quote = { key: spotRequestKey(request), request, output: spotDecimal(parseSpotAmount(path.destination_amount)),
+      route: [request.from, ...path.path.map(asset => pathAsset(asset, request.from.network)), request.to] };
+    const key = spotRouteKey(quote);
+    if (seen.has(key)) return [];
+    seen.add(key);
+    return [quote];
+  });
+}
+export function selectSpotPath(records: SpotPathRecord[], quote: SpotQuote): SpotPathRecord {
+  const path = validSpotPaths(records, quote.request).find(path => {
+    const candidate = quoteFromPaths([path], quote.request);
+    return candidate && spotRouteKey(candidate) === spotRouteKey(quote);
+  });
+  if (!path) throw new Error("Your selected Stellar path is no longer available. Refresh quotes and choose another path.");
+  return path;
 }
 export function quoteFromPaths(records: SpotPathRecord[], request: SpotRequest): SpotQuote | null {
   const path = chooseSpotPath(records, request);
@@ -264,8 +298,7 @@ export function spotTransactionUrl(hash: string, network: SpotNetworkId = "testn
   return explorer.pathname.endsWith(network === "testnet" ? "/testnet" : "/public") ? `${explorer.toString().replace(/\/$/, "")}/tx/${hash}` : undefined;
 }
 
-// Compatibility boundary for Blux 0.3.7: inspect its re-quoted envelope before
-// calling the original wallet signer. Never build a replacement swap here.
+// Bind wallet approval and submission to the inspected transaction body.
 export function spotEnvelopeHash(xdr: string, network: SpotNetworkId = "testnet") {
   const tx = TransactionBuilder.fromXDR(xdr, spotNetwork(network).passphrase);
   if (!(tx instanceof Transaction)) throw new Error("An unexpected signed envelope was returned. Submission is blocked.");
@@ -291,6 +324,10 @@ export function inspectSpotEnvelope(xdr: string, quote: SpotQuote, bps: number, 
   }
   if (parseSpotAmount(operation.destMin) < parseSpotAmount(minimumReceived(quote.output, bps))) {
     throw new Error("The new quote would weaken your reviewed minimum received. Refresh the quote and review it again.");
+  }
+  if (quote.route) {
+    const actual = [request.from, ...operation.path.map(asset => asset.isNative() ? spotAsset("XLM", undefined, network) : spotAsset(asset.getCode(), asset.getIssuer(), network)), request.to];
+    if (spotRouteKey({ ...quote, route: actual }) !== spotRouteKey(quote)) throw new Error("The selected Stellar path changed. Refresh quotes before approving.");
   }
   let newEntry = 0;
   for (const op of tx.operations) {

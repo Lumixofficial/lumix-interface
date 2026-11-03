@@ -3,6 +3,7 @@ const { test, expect } = require('@playwright/test');
 const { Address, Asset, Keypair, Networks, TransactionBuilder, nativeToScVal, scValToNative, xdr } = require('@stellar/stellar-sdk');
 const { installSpotTestWallet } = require('./helpers/spot-wallet.cjs');
 const { spotApiFixture, issuer, aggregator } = require('./helpers/spot-api-fixture.cjs');
+const { spotSacFixture } = require('./helpers/spot-sac-fixture.cjs');
 const entries = require('./fixtures/spot-aggregator-spec.json').entries;
 const horizon = 'https://horizon.stellar.org';
 const mainnetRpc = process.env.NEXT_PUBLIC_STELLAR_MAINNET_RPC_URL || 'https://mainnet.sorobanrpc.com';
@@ -11,9 +12,18 @@ const name = Buffer.from('contractspecv0');
 const section = Buffer.concat([leb(name.length), name, ...entries.map(value => Buffer.from(value, 'base64'))]);
 const wasm = Buffer.concat([Buffer.from([0, 97, 115, 109, 1, 0, 0, 0, 0]), leb(section.length), section]);
 
-async function setup(page, context, { apiEnabled = true, configError = false } = {}) {
+async function setup(page, context, { apiEnabled = true, configError = false, nativeAlternatives = false, apiMinimum, apiOutput = '102', apiSplit = true, nativeOutput = '100' } = {}) {
   const trader = Keypair.random(), address = trader.publicKey();
   await installSpotTestWallet(context, trader, { signingNetwork: Networks.PUBLIC });
+  await page.route('https://api.blux.cc/**', route => {
+    const path = new URL(route.request().url()).pathname;
+    const result = path === '/auth/validate' ? { privacy_policy: '', terms: '', socials: [] }
+      : path === '/auth' ? { challenge: `lumix-spot-fixture:${address}`, network_passphrase: Networks.PUBLIC }
+      : path === '/auth/code' ? 'lumix-spot-fixture-session'
+      : path === '/users' ? { auth_method: 'wallet', auth_value: 'Freighter', public_key: address, wallet: address } : undefined;
+    return route.fulfill({ status: result === undefined ? 404 : 200, json: result === undefined
+      ? { status: 404, error: 'Unexpected mocked Blux endpoint.' } : { status: 200, message: 'Fixture', result } });
+  });
   let hash, signedCall, nativeOperations, submissions = 0, requests = [], quoteError = false;
   const account = { account_id: address, id: address, sequence: '10000', subentry_count: 1, data_attr: {},
     thresholds: { low_threshold: 1, med_threshold: 1, high_threshold: 1 }, signers: [], flags: { auth_required: false },
@@ -32,7 +42,11 @@ async function setup(page, context, { apiEnabled = true, configError = false } =
     if (url.pathname.startsWith('/accounts/')) return route.fulfill({ json: account });
     if (url.pathname === '/ledgers') return route.fulfill({ json: { _embedded: { records: [{ base_reserve_in_stroops: 5000000, base_fee_in_stroops: 100, closed_at: new Date().toISOString() }] } } });
     if (url.pathname === '/assets') return route.fulfill({ json: { _embedded: { records: [{ asset_code: 'USDC', asset_issuer: issuer, flags: { auth_required: false } }] } } });
-    if (url.pathname === '/paths/strict-send') return route.fulfill({ json: { _embedded: { records: [{ source_asset_type: 'native', source_amount: url.searchParams.get('source_amount'), destination_asset_type: 'credit_alphanum4', destination_asset_code: 'USDC', destination_asset_issuer: issuer, destination_amount: '100', path: [] }] } } });
+    if (url.pathname === '/paths/strict-send') {
+      const direct = { source_asset_type: 'native', source_amount: url.searchParams.get('source_amount'), destination_asset_type: 'credit_alphanum4', destination_asset_code: 'USDC', destination_asset_issuer: issuer, destination_amount: nativeOutput, path: [] };
+      const indirect = { ...direct, destination_amount: '103', path: [{ asset_type: 'credit_alphanum4', asset_code: 'AQUA', asset_issuer: issuer }, { asset_type: 'credit_alphanum4', asset_code: 'EURC', asset_issuer: issuer }] };
+      return route.fulfill({ json: { _embedded: { records: nativeAlternatives ? [direct, indirect] : [direct] } } });
+    }
     if (url.pathname === '/transactions' && route.request().method() === 'POST') {
       const tx = TransactionBuilder.fromXDR(new URLSearchParams(route.request().postData()).get('tx'), Networks.PUBLIC);
       submissions++; nativeOperations = tx.operations; hash = Buffer.from(tx.hash()).toString('hex');
@@ -44,8 +58,13 @@ async function setup(page, context, { apiEnabled = true, configError = false } =
   await page.route('**/api/spot/quotes', route => {
     if (route.request().method() === 'GET') return route.fulfill({ status: configError ? 503 : 200, json: { enabled: apiEnabled } });
     const body = route.request().postDataJSON(); requests.push(body);
-    return route.fulfill(quoteError ? { status: 503, json: { error: { message: 'Quote service offline.' } } }
-      : { json: spotApiFixture(address, { amount: body.amount, bps: body.options.slippageBps }) });
+    const value = spotApiFixture(address, { amount: body.amount, bps: body.options.slippageBps, output: apiOutput, split: apiSplit });
+    if (apiMinimum) {
+      value.data[0].minimumReceived = apiMinimum;
+      value.data[0].minimumReceivedRaw = String(BigInt(Math.round(Number(apiMinimum) * 1e7)));
+      value.data[0].txData.args[0].limit = value.data[0].minimumReceivedRaw;
+    }
+    return route.fulfill(quoteError ? { status: 503, json: { error: { message: 'Quote service offline.' } } } : { json: value });
   });
   const data = new xdr.SorobanTransactionData({ ext: xdr.SorobanTransactionDataExt.v0(), resourceFee: 1000n,
     resources: new xdr.SorobanResources({ footprint: new xdr.LedgerFootprint({ readOnly: [], readWrite: [] }), instructions: 1000000, diskReadBytes: 0, writeBytes: 0 }) });
@@ -77,17 +96,12 @@ async function setup(page, context, { apiEnabled = true, configError = false } =
     return route.fulfill({ json: { jsonrpc: '2.0', id: request.id, result } });
   });
   await page.goto('/spot');
-  const defaultNetwork = process.env.NEXT_PUBLIC_STELLAR_NETWORK?.trim().toLowerCase() || 'testnet';
-  await expect(page.locator('#spot-network')).toHaveValue(defaultNetwork);
-  await expect(page.locator('.spot-network')).toHaveText(`NetworkStellar ${defaultNetwork === 'mainnet' ? 'Mainnet' : 'Testnet'}`);
-  await page.evaluate(passphrase => { window.__spotTestWallet.network = passphrase; }, defaultNetwork === 'mainnet' ? Networks.PUBLIC : Networks.TESTNET);
+  await page.evaluate(passphrase => { window.__spotTestWallet.network = passphrase; }, Networks.PUBLIC);
   await page.getByRole('button', { name: 'Connect wallet', exact: true }).last().click();
   await page.getByRole('button', { name: /Freighter/ }).click();
   await page.getByRole('button', { name: 'Approve test wallet request', exact: true }).click();
-  await page.locator('#spot-network').selectOption('mainnet');
-  await page.evaluate(passphrase => { window.__spotTestWallet.network = passphrase; }, Networks.PUBLIC);
   await page.locator('#pay-amount').fill('100');
-  await expect(page.getByRole('radio')).toHaveCount(apiEnabled && !configError ? 2 : 1);
+  await expect(page.getByRole('radio')).toHaveCount(1 + (apiEnabled && !configError ? 1 : 0));
   return { requests, get submissions() { return submissions; }, get signedCall() { return signedCall; }, get nativeOperations() { return nativeOperations; }, setQuoteError: () => { quoteError = true; } };
 }
 
@@ -112,10 +126,18 @@ test('without an API, Mainnet shows one native quote and submits only a Stellar 
   expect(state.requests).toHaveLength(0);
 });
 
+for (const source of ['native', 'soroban']) test(`${source} wallet rejection never submits a transaction`, async ({ page, context }) => {
+  const state = await setup(page, context, { apiEnabled: source === 'soroban' });
+  await page.getByRole('button', { name: 'Review swap', exact: true }).click();
+  await page.getByRole('button', { name: 'Swap XLM for USDC', exact: true }).click();
+  await page.getByRole('button', { name: 'Reject test wallet request', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Swap cancelled', exact: true })).toBeVisible();
+  expect(state.submissions).toBe(0);
+});
+
 test('a failed configuration check leaves the native quote usable', async ({ page, context }) => {
   const state = await setup(page, context, { configError: true });
-  await expect(page.locator('.spot-quotes-head')).toHaveText('Swap quote1 quote');
-  await expect(page.locator('.spot-quotes')).not.toContainText('Soroban');
+  await expect(page.getByText(/Quote configuration is unavailable/)).toBeVisible();
   await expect(page.getByRole('button', { name: 'Review swap', exact: true })).toBeEnabled();
   expect(state.requests).toHaveLength(0);
 });
@@ -126,19 +148,21 @@ for (const width of [1440, 390]) test(`Mainnet quote selection, split details an
   const radios = page.getByRole('radio');
   await expect(radios.first()).toBeChecked();
   await expect(page.getByLabel('Estimated receive amount')).toHaveText('102.00');
-  await radios.last().check();
+  await page.locator('.spot-quote-choice').last().click();
+  await expect(radios.last()).toBeChecked();
   await expect(page.getByLabel('Estimated receive amount')).toHaveText('100.00');
-  await radios.first().check();
-  await page.locator('.spot-quote-option').first().locator('summary').click();
-  await expect(page.locator('.spot-quote-option').first()).toContainText('60% allocation');
-  await expect(page.locator('.spot-quote-option').first()).toContainText('40% allocation');
-  await expect(page.locator('.spot-quote-option').first()).toContainText('Hop 2 · Soroswap');
-  await expect(page.locator('.spot-quote-option').first()).toContainText('Hop 1 · Aquarius');
+  await page.locator('.spot-quote-choice').first().click();
+  await expect(radios.first()).toBeChecked();
+  await page.getByRole('button', { name: 'Show routing breakdown for Soroswap + Aquarius' }).click();
+  await expect(page.locator('.spot-quote-option').first()).toContainText('60%');
+  await expect(page.locator('.spot-quote-option').first()).toContainText('40%');
+  await expect(page.locator('.spot-quote-option').first()).toContainText('Best minimum received');
+  await expect(page.locator('.spot-quote-option').first()).toContainText('Min 101.694 USDC');
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.screenshot({ path: `.impeccable/review/spot-soroban-${width}.png`, fullPage: true });
   await page.getByRole('button', { name: 'Review swap', exact: true }).click();
   const dialog = page.locator('[data-spot-review] .review-modal');
-  await expect(dialog).toContainText('101.69 USDC');
+  await expect(dialog).toContainText('101.694 USDC');
   await expect(dialog).toContainText('Stellar Mainnet');
   await dialog.getByRole('button', { name: 'Swap XLM for USDC', exact: true }).click();
   await page.getByRole('button', { name: 'Approve test wallet request', exact: true }).click();
@@ -149,6 +173,76 @@ for (const width of [1440, 390]) test(`Mainnet quote selection, split details an
   const args = scValToNative(state.signedCall.args[0]);
   expect(String(args.amount)).toBe('1000000000'); expect(args.legs).toHaveLength(2);
   expect(state.requests[0].assetOut).toBe('USDC:' + issuer);
+});
+
+test('one best native quote is compared with protocol quotes and its path is preserved through signing', async ({ page, context }) => {
+  const state = await setup(page, context, { nativeAlternatives: true });
+  await expect(page.locator('.spot-quote-copy > strong', { hasText: 'Stellar AMM / order book' })).toHaveCount(1);
+  await expect(page.locator('.spot-quote-option').last()).toContainText('Soroswap + Aquarius');
+  await expect(page.getByLabel('Estimated receive amount')).toHaveText('103.00');
+  await expect(page.getByRole('radio').first()).toBeChecked();
+  await expect(page.locator('.spot-quote-option').first()).toContainText('XLM → AQUA → EURC → USDC');
+  await page.locator('.spot-quote-choice').last().click();
+  await expect(page.getByRole('radio').last()).toBeChecked();
+  await expect(page.getByLabel('Estimated receive amount')).toHaveText('102.00');
+  await page.locator('.spot-quote-choice').first().click();
+  await expect(page.getByRole('radio').first()).toBeChecked();
+  await expect(page.getByLabel('Estimated receive amount')).toHaveText('103.00');
+  await page.getByRole('button', { name: 'Review swap', exact: true }).click();
+  await page.getByRole('button', { name: 'Swap XLM for USDC', exact: true }).click();
+  await page.getByRole('button', { name: 'Approve test wallet request', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Swap complete' })).toBeVisible();
+  expect(state.nativeOperations[0].path.map(asset => asset.code)).toEqual(['AQUA', 'EURC']);
+  expect(state.submissions).toBe(1);
+});
+
+test('tiny native and protocol minimums remain nonzero in quote rows, details and review', async ({ page, context }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await setup(page, context, { apiOutput: '0.0000012', apiSplit: false, nativeOutput: '0.0000011' });
+  const quotes = page.locator('.spot-quote-option');
+  await expect(quotes.first()).toContainText('Soroswap');
+  await expect(quotes.first()).toContainText('Min 0.0000011 USDC');
+  await expect(quotes.last()).toContainText('Min 0.000001 USDC');
+  await expect(page.getByLabel('Estimated receive amount')).toHaveText('0.0000012');
+  await page.getByRole('button', { name: 'Transaction details', exact: true }).click();
+  await expect(page.locator('#spot-transaction-details')).toContainText('0.0000011 USDC');
+  await page.getByRole('button', { name: 'Review swap', exact: true }).click();
+  await expect(page.locator('.review-breakdown')).toContainText('0.0000011 USDC');
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: '.impeccable/review/spot-tiny-minimum-390.png', fullPage: true });
+});
+
+test('the largest minimum is selected across API and native quotes, including higher native estimates', async ({ page, context }) => {
+  await setup(page, context, { apiMinimum: '101.99' });
+  await page.route(horizon + '/paths/strict-send*', route => route.fulfill({ json: { _embedded: { records: [{ source_asset_type: 'native', source_amount: new URL(route.request().url()).searchParams.get('source_amount'), destination_asset_type: 'credit_alphanum4', destination_asset_code: 'USDC', destination_asset_issuer: issuer, destination_amount: '102.1', path: [] }] } } }));
+  await page.locator('#pay-amount').fill('101');
+  await expect(page.getByRole('radio')).toHaveCount(2);
+  await expect(page.locator('.spot-quote-option').first()).toContainText('Soroswap + Aquarius');
+  await expect(page.getByRole('radio').first()).toBeChecked();
+  await expect(page.locator('.spot-quote-option').last()).toContainText('Est. 102.10 USDC');
+  await page.locator('.spot-quote-choice').last().click();
+  await expect(page.getByRole('radio').last()).toBeChecked();
+  await expect(page.getByLabel('Estimated receive amount')).toHaveText('102.10');
+});
+
+for (const side of ['pay', 'receive']) test(`SAC address resolves in the ${side} picker without keeping stale results`, async ({ page, context }) => {
+  await setup(page, context, { apiEnabled: false });
+  const asset = new Asset('CUSTOM', Keypair.random().publicKey());
+  const entry = spotSacFixture(asset, Networks.PUBLIC);
+  await page.route(mainnetRpc.replace(/\/$/, '') + '**', route => {
+    const request = route.request().postDataJSON();
+    return route.fulfill({ json: { jsonrpc: '2.0', id: request.id, result: { latestLedger: 100, entries: request.params.keys.map(key => ({ key, xdr: entry.xdr })) } } });
+  });
+  await page.getByRole('button', { name: new RegExp(`Choose ${side} asset:`) }).click();
+  const search = page.getByRole('searchbox');
+  await search.fill(entry.address);
+  const option = page.getByRole('option', { name: new RegExp('CUSTOM.*' + asset.issuer) });
+  await expect(option).toBeVisible();
+  await search.fill('UNRELATED');
+  await expect(option).toHaveCount(0);
+  await search.fill(entry.address);
+  await option.click();
+  await expect(page.getByRole('button', { name: new RegExp(`Choose ${side} asset: CUSTOM`) })).toBeVisible();
 });
 
 test('Soroban service failure leaves the native quote usable and slippage fetches a new API quote', async ({ page, context }) => {

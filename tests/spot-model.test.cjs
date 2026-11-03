@@ -111,6 +111,15 @@ test('display rounding uses two decimals without losing internal precision; tiny
   assert.equal(m.formatSpotFee('0'), '0.00');
   assert.equal(m.formatSpotFee('0.01'), '0.01');
 });
+test('quote displays preserve small positive minimums and never round the protected amount up', () => {
+  assert.equal(m.formatSpotAmount(m.minimumReceived('0.001', 30)), '0.00');
+  assert.equal(m.formatSpotQuoteAmount(m.minimumReceived('0.001', 30)), '0.000997');
+  for (const [amount, expected] of [['0.0000001', '0.0000001'], ['0.0099999', '0.0099999'],
+    ['101.694', '101.694'], ['99.705', '99.705'], ['1000.1', '1,000.10'], ['10', '10.00']]) {
+    assert.equal(m.formatSpotQuoteAmount(amount), expected);
+    assert.equal(units(expected.replaceAll(',', '')), units(amount));
+  }
+});
 
 test('one asset search resolves code, known metadata name, full issuer and exact code:issuer identity', () => {
   assert.deepEqual(m.spotAssetSearch('EURC', [native, usdc]), { forCode: 'EURC' });
@@ -130,11 +139,16 @@ test('every supported slippage setting keeps Blux binary-to-decimal rounding at 
     assert.ok(BigInt(sdkMinimum.toFixed()) >= units(m.minimumReceived(output, bps)), `Weaker Blux minimum at ${bps} bps`);
   }
 });
-test('quotes match installed Blux path preference, allow indirect paths, and reject unrelated/empty routes', () => {
+test('native quotes rank by output, retain alternative paths, and reject unrelated/empty routes', () => {
   const hop = { asset_type: 'credit_alphanum4', asset_code: 'USDC', asset_issuer: issuer };
   const r = request();
   const short = path('1.1', [hop]);
-  assert.equal(m.chooseSpotPath([path('2', [hop, hop]), short, path('1.2')], r), short);
+  const best = path('2', [hop, hop]);
+  assert.equal(m.chooseSpotPath([best, short, path('1.2')], r), best);
+  const all = m.quotesFromPaths([best, short, path('1.2'), path('1.3'), path('9', [], { source_amount: '2' })], r);
+  assert.deepEqual(all.map(quote => quote.output), ['2', '1.3', '1.1']);
+  assert.equal(m.selectSpotPath([best, short, path('1.2')], all[2]), short);
+  assert.throws(() => m.selectSpotPath([best], all[2]), /no longer available/);
   const indirect = m.quoteFromPaths([path('2', [hop, hop])], r);
   assert.equal(indirect.output, '2'); assert.equal(indirect.route.length, 4);
   assert.equal(m.quoteFromPaths([], r), null);

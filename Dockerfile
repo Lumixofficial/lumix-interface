@@ -7,8 +7,6 @@ WORKDIR /app
 FROM base AS deps
 RUN apk add --no-cache libc6-compat
 COPY package.json package-lock.json ./
-# The postinstall hook patches @bluxcc/core, so its script must exist before npm ci.
-COPY scripts/patch-blux-spot.cjs ./scripts/
 RUN --mount=type=cache,target=/root/.npm \
     npm ci --no-audit --no-fund
 

@@ -38,6 +38,8 @@ const protocols: Record<string, string> = { soroswap: "Soroswap", aquarius: "Aqu
 const previewSender = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
 const quoteSender = (request: SpotRequest) => request.account ?? previewSender;
 export const spotProtocol = (name: string) => protocols[name] ?? name;
+export const formatSpotShare = (share: string) => Number(share) > 0 && Number(share) < 0.05
+  ? "<0.1%" : `${new Intl.NumberFormat("en-US", { maximumFractionDigits: 1 }).format(Number(share))}%`;
 export const spotQuoteProtocols = (quote: SpotCandidate) => quote.source === "native" ? "Stellar AMM / order book"
   : quote.soroban ? [...new Set(quote.soroban.legs.flatMap(leg => leg.hops.map(hop => spotProtocol(hop.protocol))))].join(" + ")
   : "Protocol unavailable";
@@ -46,7 +48,7 @@ export function spotApiBody(request: SpotRequest, bps: number) {
     assetIn: request.from.kind === "native" ? "native" : `${request.from.code}:${request.from.issuer}`,
     assetOut: request.to.kind === "native" ? "native" : `${request.to.code}:${request.to.issuer}`,
     mode: "exact-in", amount: request.amount, sender: quoteSender(request),
-    options: { slippageBps: bps, quoteLimit: 10, split: true, maxPoolAgeMs: 60_000 },
+    options: { slippageBps: bps, quoteLimit: 3, split: true, maxPoolAgeMs: 60_000 },
   };
 }
 export function validateSpotApiResponse(value: SpotApiResponse, request: SpotRequest, bps: number, passphrase: string, now = Date.now()) {
@@ -130,7 +132,8 @@ export function spotCandidates(native: SpotQuote | SpotQuote[] | undefined, api:
     quotes.push({ key, request, output: spotDecimal(BigInt(quote.amountOutRaw)), route: [request.from, request.to], source: "soroban", id: `soroban:${quote.id}`, soroban: quote });
   }
   return quotes.sort((a, b) => {
-    const delta = parseSpotAmount(spotCandidateMinimum(b, bps)) - parseSpotAmount(spotCandidateMinimum(a, bps));
+    const delta = parseSpotAmount(b.output) - parseSpotAmount(a.output)
+      || parseSpotAmount(spotCandidateMinimum(b, bps)) - parseSpotAmount(spotCandidateMinimum(a, bps));
     return delta > BigInt(0) ? 1 : delta < BigInt(0) ? -1 : 0;
-  });
+  }).slice(0, 3);
 }

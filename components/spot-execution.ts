@@ -55,7 +55,7 @@ export function verifySpotSignature(signedXdr: string, account: SigningAccount, 
 
 // Build and inspect locally, sign through Blux React's public API, then verify
 // the signed body before broadcasting. No SDK files or private APIs are patched.
-export async function executeSpotSwap(review: SpotSwapReview, signTransaction: SpotSigner, onSigned: (submission: SpotSubmission) => void): Promise<SpotExecutionResult> {
+export async function executeSpotSwap(review: SpotSwapReview, signTransaction: SpotSigner, onSigned: (submission: SpotSubmission) => void, onSubmitted?: (hash: string) => void): Promise<SpotExecutionResult> {
   const { quote } = review;
   const address = quote.request.account;
   if (!address) throw new Error("Connect your wallet before swapping.");
@@ -102,11 +102,14 @@ export async function executeSpotSwap(review: SpotSwapReview, signTransaction: S
   const signed = StellarSdk.TransactionBuilder.fromXDR(signedXdr, network.passphrase);
   if (quote.source === "native") {
     const raw = await new StellarSdk.Horizon.Server(network.horizonUrl).submitTransaction(signed);
+    if (raw.hash !== checked.hash) throw new Error("The submitted transaction does not match the reviewed swap.");
+    if (raw.successful === true) onSubmitted?.(raw.hash);
     return { hash: raw.hash, raw, returnValue: async () => ({}) };
   }
   const submitted = await rpc.sendTransaction(signed);
   if (submitted.hash !== checked.hash) throw new Error("The submitted transaction does not match the reviewed aggregator call.");
   if (submitted.status === "ERROR") throw new Error("Stellar rejected the aggregator transaction. Check status before retrying.");
+  if (submitted.status === "PENDING" || submitted.status === "DUPLICATE") onSubmitted?.(submitted.hash);
   const result = await rpc.pollTransaction(submitted.hash, { attempts: 30 });
   if (result.status !== "SUCCESS") throw new Error("Stellar has not returned a successful confirmation yet. Check status.");
   return { hash: submitted.hash, raw: result, returnValue: async () => result.returnValue ? StellarSdk.scValToNative(result.returnValue) as { amount_out?: bigint } : {} };

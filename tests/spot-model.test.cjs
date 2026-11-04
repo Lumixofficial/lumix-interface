@@ -121,6 +121,16 @@ test('quote displays preserve small positive minimums and never round the protec
   }
 });
 
+test('quote outputs use exactly seven decimals without merging competing routes or losing stroops', () => {
+  for (const [amount, expected] of [['1.6378674', '1.6378674'], ['1.6356619', '1.6356619'],
+    ['1.63', '1.6300000'], ['1000', '1,000.0000000'], ['0.0000001', '0.0000001'],
+    ['922337203685.4775807', '922,337,203,685.4775807']]) {
+    assert.equal(m.formatSpotQuoteAmount(amount, 7), expected);
+    assert.equal(m.formatSpotQuoteAmount(units(amount), 7), expected);
+    assert.equal(units(expected.replaceAll(',', '')), units(amount));
+  }
+});
+
 test('one asset search resolves code, known metadata name, full issuer and exact code:issuer identity', () => {
   assert.deepEqual(m.spotAssetSearch('EURC', [native, usdc]), { forCode: 'EURC' });
   assert.deepEqual(m.spotAssetSearch('USD Coin', [native, usdc]), { forCode: 'USDC' });

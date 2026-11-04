@@ -20,6 +20,7 @@ test('API request preserves exact asset identities, wallet, amount and user slip
   assert.equal(body.assetIn, 'native'); assert.equal(body.assetOut, 'USDC:' + issuer);
   assert.equal(body.sender, address); assert.equal(body.amount, '100'); assert.equal(body.options.slippageBps, 30);
   assert.equal(body.options.maxPoolAgeMs, 60000);
+  assert.equal(body.options.quoteLimit, 3);
   assert.notEqual(m.spotRequestKey(request), m.spotRequestKey({ ...request, from: m.spotAsset('XLM') }));
 });
 test('public previews load without a wallet and cannot be reused for a connected account', () => {
@@ -60,22 +61,46 @@ test('valid split quotes retain API txData, protocols, allocations and hop paths
   fractionalExpiry.data[0].expiresAt = new Date(Date.parse(fractionalExpiry.data[0].expiresAt) + 999).toISOString();
   assert.doesNotThrow(() => api.validateSpotApiResponse(fractionalExpiry, request, 30, Networks.PUBLIC));
 });
-test('native and Soroban candidates rank by integer minimum received without losing precision', () => {
+test('native and Soroban candidates rank by net output without losing precision', () => {
   const native = { key: m.spotRequestKey(request), request, route: [request.from, request.to], output: '102.0000001' };
   assert.deepEqual(api.spotCandidates(native, response(), request).map(quote => quote.source), ['native', 'soroban']);
   native.output = '101.9999999';
   assert.deepEqual(api.spotCandidates(native, response(), request).map(quote => quote.source), ['soroban', 'native']);
   assert.equal(api.spotCandidates(native, undefined, { ...request, amount: '101' }).length, 0);
 });
-test('a stronger API minimum wins even when the native estimate is higher; slippage changes the comparison', () => {
+test('a higher net output wins while each quote retains its protected minimum', () => {
   const native = { key: m.spotRequestKey(request), request, route: [request.from, request.to], output: '102.1' };
   const value = response();
   value.data[0].minimumReceived = '101.9'; value.data[0].minimumReceivedRaw = '1019000000';
   value.data[0].txData.args[0].limit = '1019000000';
   const checked = api.validateSpotApiResponse(value, request, 30, Networks.PUBLIC);
-  assert.equal(api.spotCandidates(native, checked, request, 30)[0].source, 'soroban');
+  assert.equal(api.spotCandidates(native, checked, request, 30)[0].source, 'native');
   assert.equal(api.spotCandidates(native, checked, request, 1)[0].source, 'native');
-  assert.equal(api.spotCandidateMinimum(api.spotCandidates(native, checked, request, 30)[0], 30), '101.9');
+  assert.equal(api.spotCandidateMinimum(api.spotCandidates(native, checked, request, 30).find(quote => quote.source === 'soroban'), 30), '101.9');
+});
+test('only the three highest net outputs survive the combined venue comparison', () => {
+  const value = response();
+  value.data = ['99', '104', '101', '105'].map((output, index) => {
+    const quote = spotApiFixture(address, { output }).data[0];
+    quote.id = `quote-${index}`;
+    return quote;
+  });
+  const native = { key: m.spotRequestKey(request), request, route: [request.from, request.to], output: '103' };
+  const checked = api.validateSpotApiResponse(value, request, 30, Networks.PUBLIC);
+  const quotes = api.spotCandidates(native, checked, request);
+  assert.equal(quotes.length, 3);
+  assert.deepEqual(quotes.map(quote => quote.output), ['105', '104', '103']);
+  assert.equal(quotes[2].source, 'native');
+});
+test('split percentages use at most one decimal without changing execution allocations', () => {
+  assert.equal(api.formatSpotShare('1.562500'), '1.6%');
+  assert.equal(api.formatSpotShare('98.437500'), '98.4%');
+  assert.equal(api.formatSpotShare('100.000000'), '100%');
+  assert.equal(api.formatSpotShare('0.001'), '<0.1%');
+  const value = response();
+  const before = structuredClone(value.data[0].txData);
+  value.data[0].legs.forEach(leg => api.formatSpotShare(leg.sharePct));
+  assert.deepEqual(value.data[0].txData, before);
 });
 test('only the best native operation quote is listed, while API quotes keep their protocol names', () => {
   const native = output => ({ key: m.spotRequestKey(request), request, route: [request.from, request.to], output });

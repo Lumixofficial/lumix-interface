@@ -44,7 +44,7 @@ export function SpotCardLoading() {
       <div className="spot-transaction-info">
         <div className="fee-disclosure"><button className="fee-summary-toggle" type="button" disabled aria-expanded="false"><span>Transaction details</span><Icon name="chevron-down" size={17} /></button></div>
       </div>
-      <div className="swap-primary-wrap"><button className="trade-button trade-button--primary trade-button--lg trade-button--block wallet-connect-button" type="button" disabled>Connect wallet</button></div>
+      <div className="swap-primary-wrap"><button className="trade-button trade-button--primary trade-button--lg trade-button--block wallet-connect-button" type="button" disabled>Loading swap…</button></div>
     </section>
   </div>;
 }

@@ -3,6 +3,13 @@
 const { Networks, TransactionBuilder, hash } = require('@stellar/stellar-sdk');
 async function installSpotTestWallet(context, keypair, { signingNetwork = Networks.TESTNET } = {}) {
   const address = keypair.publicKey();
+  // Disposable transactions must never enter the real ingestion service.
+  // Individual page routes can override this to inspect reporting behavior.
+  await context.route('**/v1/spot/swaps/record', route => route.fulfill({
+    status: route.request().method() === 'OPTIONS' ? 204 : 202,
+    headers: { 'access-control-allow-origin': '*', 'access-control-allow-methods': 'POST, OPTIONS', 'access-control-allow-headers': 'Content-Type' },
+    body: '',
+  }));
   await context.exposeBinding('__spotWalletAction', async (_source, request) => {
     if (request.type === 'SUBMIT_BLOB') {
       const payload = Buffer.from(`Stellar Signed Message:\n${request.blob}`, 'utf8');
@@ -54,13 +61,13 @@ async function installSpotTestWallet(context, keypair, { signingNetwork = Networ
       if (['REQUEST_PUBLIC_KEY', 'REQUEST_ACCESS', 'REQUEST_USER_INFO'].includes(request.type)) response = { publicKey: address, address, isAllowed: true };
       else if (['REQUEST_ALLOWED_STATUS', 'SET_ALLOWED_STATUS'].includes(request.type)) response = { isAllowed: true };
       else if (request.type === 'REQUEST_CONNECTION_STATUS') response = { isConnected: true };
-      else if (request.type === 'REQUEST_NETWORK') response = { network: current === passphrase ? 'TESTNET' : 'PUBLIC', networkPassphrase: current };
+      else if (request.type === 'REQUEST_NETWORK') response = { network: current === 'Test SDF Network ; September 2015' ? 'TESTNET' : 'PUBLIC', networkPassphrase: current };
       else if (request.type === 'REQUEST_NETWORK_DETAILS') response = { networkDetails: { network: 'TESTNET', networkPassphrase: current, networkUrl: 'https://horizon-testnet.stellar.org', sorobanRpcUrl: 'https://soroban-testnet.stellar.org' } };
       else if (['SUBMIT_BLOB', 'SUBMIT_TRANSACTION'].includes(request.type)) response = await approve(request);
       else response = { apiError: { code: -1, message: `Unsupported Testnet fixture request: ${request.type}` } };
       window.postMessage({ ...response, source: 'FREIGHTER_EXTERNAL_MSG_RESPONSE', messagedId: request.messageId }, location.origin);
     });
-  }, { address, passphrase: Networks.TESTNET });
+  }, { address, passphrase: signingNetwork });
   return address;
 }
 module.exports = { installSpotTestWallet };

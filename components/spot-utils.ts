@@ -96,10 +96,10 @@ export function formatSpotAmount(value: string | bigint) {
 }
 // Quote limits must stay visible down to one stroop and must never be rounded
 // up beyond the amount the transaction actually protects.
-export function formatSpotQuoteAmount(value: string | bigint) {
+export function formatSpotQuoteAmount(value: string | bigint, minimumFractionDigits: 2 | 7 = 2) {
   try {
     const [whole, fraction = ""] = spotDecimal(typeof value === "bigint" ? value : parseSpotAmount(value)).split(".");
-    return `${whole.replace(/\B(?=(\d{3})+(?!\d))/g, ",")}.${fraction.padEnd(2, "0")}`;
+    return `${whole.replace(/\B(?=(\d{3})+(?!\d))/g, ",")}.${fraction.padEnd(minimumFractionDigits, "0")}`;
   } catch { return "—"; }
 }
 export function formatSpotFee(value: string | bigint) {

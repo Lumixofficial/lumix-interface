@@ -4,12 +4,13 @@ const aggregator = StrKey.encodeContract(Buffer.alloc(32, 5));
 const contract = byte => StrKey.encodeContract(Buffer.alloc(32, byte));
 const raw = value => { const [whole, fraction = ''] = value.split('.'); return BigInt(whole) * 10000000n + BigInt(fraction.padEnd(7, '0')); };
 const decimal = value => `${value / 10000000n}.${(value % 10000000n).toString().padStart(7, '0')}`;
-function spotApiFixture(sender, { amount = '100', output = '102', bps = 30, split = true, expires = Math.floor(Date.now() / 1000) + 120 } = {}) {
+function spotApiFixture(sender, { amount = '100', output = '102', bps = 30, split = true, shares = [60, 40], expires = Math.floor(Date.now() / 1000) + 120 } = {}) {
   const input = Asset.native().contractId(Networks.PUBLIC), out = new Asset('USDC', issuer).contractId(Networks.PUBLIC);
   const mid = contract(6), minimum = raw(output) * BigInt(10000 - bps) / 10000n;
-  const legs = (split ? [60, 40] : [100]).map((share, index) => {
-    const amountInRaw = raw(amount) * BigInt(share) / 100n, amountOutRaw = raw(output) * BigInt(share) / 100n;
-    const minimumReceivedRaw = minimum * BigInt(share) / 100n;
+  const legs = (split ? shares : [100]).map((share, index) => {
+    const allocation = BigInt(Math.round(Number(share) * 1e6));
+    const amountInRaw = raw(amount) * allocation / 100000000n, amountOutRaw = raw(output) * allocation / 100000000n;
+    const minimumReceivedRaw = minimum * allocation / 100000000n;
     const path = index === 0 && split ? [input, mid, out] : [input, out];
     return { routeId: 'route-' + index, amountIn: decimal(amountInRaw), amountInRaw: String(amountInRaw),
       amountOut: decimal(amountOutRaw), amountOutRaw: String(amountOutRaw), minimumReceived: decimal(minimumReceivedRaw), minimumReceivedRaw: String(minimumReceivedRaw),

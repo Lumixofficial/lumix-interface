@@ -29,6 +29,7 @@ import { LUMIX_PUBLIC_CONFIG } from "./runtime-config";
 import { LUMIX_STELLAR_NETWORK, walletAssetKey } from "./stellar-network";
 import { SPOT_NETWORK, SPOT_NETWORKS, SPOT_MAINNET_USDC_ISSUER } from "./spot-network";
 import { circleTestnetUsdc } from "./spot-verified-assets.json";
+import { clearSavedWallet, saveWallet } from "./wallet-session";
 
 type LumixTheme = "dark" | "light";
 type WalletBalanceLine = {
@@ -134,6 +135,8 @@ function WalletController({ onStateChange }: { onStateChange: Dispatch<SetStateA
       refetchOnMount: "always",
       refetchOnReconnect: "always",
       refetchOnWindowFocus: "always",
+      refetchInterval: 10_000,
+      refetchIntervalInBackground: false,
       retry: 1,
       staleTime: 0,
     },
@@ -152,11 +155,20 @@ function WalletController({ onStateChange }: { onStateChange: Dispatch<SetStateA
       refetchOnMount: "always",
       refetchOnReconnect: "always",
       refetchOnWindowFocus: "always",
+      refetchInterval: 10_000,
+      refetchIntervalInBackground: false,
       retry: 1,
       staleTime: 0,
     },
   );
   const refetchMainnetBalances = mainnetBalancesQuery.refetch;
+
+  // BluxProvider owns session hydration. Only persist its verified user;
+  // an initially unauthenticated snapshot is not a failed restore or logout.
+  useEffect(() => {
+    if (!isAuthenticated || !address) return;
+    saveWallet(address);
+  }, [address, isAuthenticated]);
 
   useEffect(() => {
     // Authentication arrives asynchronously from the shared wallet store.
@@ -170,9 +182,11 @@ function WalletController({ onStateChange }: { onStateChange: Dispatch<SetStateA
     const releaseConnectingState = () => setIsConnecting(false);
     const stopOpenedListener = events.on(BluxEvent.ModalOpened, releaseConnectingState);
     const stopClosedListener = events.on(BluxEvent.ModalClosed, releaseConnectingState);
+    const stopLogoutListener = events.on(BluxEvent.LoggedOut, () => { clearSavedWallet(); releaseConnectingState(); });
     return () => {
       stopOpenedListener();
       stopClosedListener();
+      stopLogoutListener();
     };
   }, []);
 
@@ -210,7 +224,7 @@ function WalletController({ onStateChange }: { onStateChange: Dispatch<SetStateA
     if (!isAuthenticated || !mainnetBalancesQuery.data) return undefined;
     const line = (mainnetBalancesQuery.data as WalletBalanceLine[]).find((balance) => balance.asset_type !== "native"
       && balance.asset_code === "USDC" && balance.asset_issuer === SPOT_MAINNET_USDC_ISSUER);
-    return line ? spendableBalance(line) : undefined;
+    return line ? spendableBalance(line) : 0;
   }, [isAuthenticated, mainnetBalancesQuery.data]);
   const mainnetUsdcBalanceStatus: BalanceStatus = !isAuthenticated
     ? "idle"
@@ -245,6 +259,7 @@ function WalletController({ onStateChange }: { onStateChange: Dispatch<SetStateA
   }, [blux, isConnecting]);
 
   const disconnect = useCallback(() => {
+    clearSavedWallet();
     setConnectionMessage("");
     setIsConnecting(false);
     onStateChange((current) => ({
@@ -347,6 +362,8 @@ export function BluxRuntime({ onStateChange, children }: { onStateChange: Dispat
     explorer: LUMIX_STELLAR_NETWORK.explorer,
     promptOnWrongNetwork: true,
     showWalletUIs: false,
+    // In 0.3.10 this flag makes the modal sticky, not the session persistent.
+    // createConfig automatically validates and restores Blux's saved session.
     isPersistent: false,
     loginMethods: ["wallet", "email", "google"],
     appearance: theme === "light" ? lightAppearance : darkAppearance,

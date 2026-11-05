@@ -59,7 +59,7 @@ test('the default endpoint accepts an empty 202 response and sends only JSON att
   const fetch = t.mock.method(globalThis, 'fetch', async () => new Response(null, { status: 202 }));
   await recordSpotSwap(payload);
   const [url, options] = fetch.mock.calls[0].arguments;
-  assert.equal(url, 'http://localhost:8080/v1/spot/swaps/record');
+  assert.equal(url, '/api/spot/swaps/record');
   assert.equal(options.method, 'POST');
   assert.deepEqual(options.headers, { 'Content-Type': 'application/json' });
   assert.deepEqual(JSON.parse(options.body), { ...payload, route: {} });
@@ -73,13 +73,13 @@ test('the default endpoint accepts an empty 202 response and sends only JSON att
   assert.equal(error.mock.callCount(), 0);
 });
 
-test('configured API base URLs preserve their path without duplicate slashes', async t => {
+test('browser attribution always uses the same-origin proxy even when a public API URL is configured', async t => {
   restoreApiUrl(t);
   process.env.NEXT_PUBLIC_API_URL = ' https://api.example/base/// ';
   t.mock.method(console, 'log', () => {});
   const fetch = t.mock.method(globalThis, 'fetch', async () => new Response(null, { status: 202 }));
   await recordSpotSwap({ ...payload, route: { path: ['XLM', 'USDC'] } });
-  assert.equal(fetch.mock.calls[0].arguments[0], 'https://api.example/base/v1/spot/swaps/record');
+  assert.equal(fetch.mock.calls[0].arguments[0], '/api/spot/swaps/record');
   assert.deepEqual(JSON.parse(fetch.mock.calls[0].arguments[1].body).route, { path: ['XLM', 'USDC'] });
 });
 

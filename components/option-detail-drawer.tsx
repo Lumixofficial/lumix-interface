@@ -522,10 +522,12 @@ export function OptionDetailDrawer({
   const isPositionClose = request?.source === "position";
   const present = open || closing;
 
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- The portal must wait for the client document after SSR.
   useEffect(() => setMounted(true), []);
 
   useEffect(() => {
     if (!open) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- Reset the imperative entry animation before the next animation frame.
       setEntered(false);
       return;
     }
@@ -548,6 +550,7 @@ export function OptionDetailDrawer({
     if (!open || !suppliedContract || !request) return;
     const target = request.targetOrderId ? orders.find((order) => order.id === request.targetOrderId) : undefined;
     const defaultPremium = request.initialPremium ?? target?.limitPremium;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- A versioned external drawer request starts a fresh draft without remounting the exit animation.
     setActiveTab("trade");
     setTradeView("summary");
     setPremiumAdjustment(0);

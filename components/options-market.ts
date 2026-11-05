@@ -609,7 +609,7 @@ export function submitOptionOrder(
   }
 
   const orderId = `mine-${state.sequence}`;
-  let taker: OptionOrder = {
+  const taker: OptionOrder = {
     id: orderId,
     owner: CURRENT_USER,
     pairId: draft.pairId,

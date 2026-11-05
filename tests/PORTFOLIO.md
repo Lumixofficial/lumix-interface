@@ -6,7 +6,8 @@ The pure tests cover fee treatment, outcome eligibility, date boundaries,
 deduplication, partial Options closes, account/network validation, corrupted
 storage, and confirmed-payment receipt recovery (including refresh and quota errors).
 
-For browser checks, start the app on `http://localhost:3000`, and start Chrome
+For browser checks, start the app on any port and set `LUMIX_TEST_ORIGIN` to its
+HTTP(S) origin (or export its `PORT`). Start Chrome
 with a **separate disposable profile** and `--remote-debugging-port=9239`.
 Open `/portfolio` in that browser before running:
 

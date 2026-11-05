@@ -1,4 +1,5 @@
 const { test, expect } = require('@playwright/test');
+const { FEATURES } = require('../components/app-routes.ts');
 const fs = require('node:fs');
 const path = require('node:path');
 const { setEarnWalletFixture, loadAllEarnPools } = require('./helpers/earn-wallet.cjs');
@@ -33,6 +34,7 @@ async function layout(page) {
 const screenshots = path.resolve('.impeccable/review');
 
 test.beforeEach(async ({ page }) => {
+  test.skip(FEATURES.earnVaults.comingSoon, 'Earn workspace interactions apply after its release gate is enabled.');
   await page.goto('/earn');
   await setEarnWalletFixture(page, true);
   await loadAllEarnPools(page, expect);

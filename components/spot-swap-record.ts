@@ -23,9 +23,8 @@ export function spotSwapRecordPayload(txHash: string, quote: SpotCandidate): Rec
 // Best effort only. Callers must not await attribution before confirming a swap.
 export async function recordSpotSwap(payload: RecordSwapPayload) {
   try {
-    const apiUrl = (process.env.NEXT_PUBLIC_API_URL?.trim() || "http://localhost:8080").replace(/\/+$/, "");
     console.log(`[Swap Attribution] Reporting ${payload.venue} swap ${payload.txHash} to API...`);
-    const response = await fetch(`${apiUrl}/v1/spot/swaps/record`, {
+    const response = await fetch("/api/spot/swaps/record", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ...payload, route: payload.route ?? {} }),

@@ -1,15 +1,17 @@
-// Browser fixtures in an isolated Chrome profile. Start the app on :3000 and
+// Browser fixtures in an isolated Chrome profile. Set LUMIX_TEST_ORIGIN and start
 // Chromium with remote debugging on :9239 before running this script.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { browserTestOrigin } = require('./helpers/browser-origin.cjs');
 
 const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
 
 (async () => {
+  const origin = browserTestOrigin();
   const pages = await fetch('http://127.0.0.1:9239/json').then(response => response.json());
-  const page = pages.find(candidate => candidate.url.startsWith('http://localhost:3000/'));
-  assert.ok(page, 'Open a localhost:3000 page in the test browser first.');
+  const page = pages.find(candidate => candidate.url.startsWith(origin + '/'));
+  assert.ok(page, 'Open the configured frontend origin in the test browser first.');
 
   const socket = new WebSocket(page.webSocketDebuggerUrl);
   await new Promise(resolve => socket.addEventListener('open', resolve));
@@ -33,7 +35,7 @@ const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, millise
     return result.result.value;
   };
   const navigate = async route => {
-    await call('Page.navigate', { url: `http://localhost:3000${route}` });
+    await call('Page.navigate', { url: `${origin}${route}` });
     await sleep(1100);
   };
   const clickExact = async (selector, text) => {
@@ -109,7 +111,7 @@ const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, millise
   assert.equal(await evaluate("document.querySelector('.earn-page h1').textContent"), 'Earn', 'Direct Earn entry renders the pool workspace.');
 
   const missingRoute = `/missing-${Date.now()}`;
-  const missingResponse = await fetch(`http://localhost:3000${missingRoute}`);
+  const missingResponse = await fetch(`${origin}${missingRoute}`);
   assert.equal(missingResponse.status, 404, 'Unknown URLs must preserve a 404 response.');
   await navigate('/options');
   await navigate(missingRoute);

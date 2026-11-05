@@ -44,13 +44,14 @@ in document flow. Mobile places management immediately after the chart and
 uses compact activity records. The app footer follows the complete content.
 
 Run focused checks:
+Set `PORT` to the port of the running frontend; no browser harness assumes a port.
 
 ```powershell
 npm run lint:earn
 npm run typecheck
 npm run test:earn
 npm run build
-$env:EARN_TEST_BASE_URL = 'http://localhost:3000'
+$env:EARN_TEST_BASE_URL = "http://localhost:$env:PORT"
 npm run test:earn:browser
 ```
 
@@ -68,7 +69,7 @@ amount precision validation, pool descriptions, numbered whole-row navigation,
 new tabs, and desktop/mobile wallet states. To run only these checks:
 
 ```powershell
-$env:EARN_TEST_BASE_URL = 'http://localhost:3000'
+$env:EARN_TEST_BASE_URL = "http://localhost:$env:PORT"
 node node_modules/@playwright/test/cli.js test --config=playwright.earn.config.cjs --grep 'refinement desktop|refinement mobile'
 npm run typecheck
 ```
@@ -83,7 +84,7 @@ removed mock-related wording, and consolidated Execution details. They also
 check exact input precision and absence of horizontal overflow on mobile.
 
 ```powershell
-$env:EARN_TEST_BASE_URL = 'http://localhost:3000'
+$env:EARN_TEST_BASE_URL = "http://localhost:$env:PORT"
 node node_modules/@playwright/test/cli.js test --config=playwright.earn.config.cjs --grep 'overview desktop|overview mobile'
 npm run typecheck
 ```

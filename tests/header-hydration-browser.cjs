@@ -1,9 +1,10 @@
-// Start Lumix on :3000 and Chromium with remote debugging on :9239.
+// Set LUMIX_TEST_ORIGIN and start an isolated Chromium on debug port :9239.
 const assert = require('node:assert/strict');
+const { browserTestOrigin } = require('./helpers/browser-origin.cjs');
 
 const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
 const hydrationPattern = /hydration|hydrated|server rendered html|didn't match/i;
-const origin = process.env.LUMIX_TEST_ORIGIN ?? 'http://localhost:3000';
+const origin = browserTestOrigin();
 
 (async () => {
   const target = await fetch(`http://127.0.0.1:9239/json/new?${encodeURIComponent(`${origin}/spot`)}`, { method: 'PUT' }).then(response => response.json());

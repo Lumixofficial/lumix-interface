@@ -19,7 +19,7 @@ const {
 test('feature availability is centralized and matches the launch configuration', () => {
   assert.deepEqual(
     Object.fromEntries(Object.entries(FEATURES).map(([feature, configuration]) => [feature, configuration.comingSoon])),
-    { spot: false, options: false, perpetuals: false, earnVaults: false, portfolio: false },
+    { spot: false, options: true, perpetuals: true, earnVaults: true, portfolio: true },
   );
 });
 
@@ -37,11 +37,11 @@ test('every product remains navigable and Spot is the shared home destination', 
 });
 
 test('back navigation accepts only currently available product routes', () => {
-  assert.equal(isAvailableProductRoute('/portfolio'), true);
-  assert.equal(isAvailableProductRoute('/earn'), true);
-  assert.equal(resolveAvailableReturnRoute('/options'), '/options');
-  assert.equal(resolveAvailableReturnRoute('/portfolio'), '/portfolio');
-  assert.equal(resolveAvailableReturnRoute('/earn'), '/earn');
+  assert.equal(isAvailableProductRoute('/spot'), true);
+  for (const route of ['/portfolio', '/earn', '/options', '/perpetuals']) {
+    assert.equal(isAvailableProductRoute(route), false);
+    assert.equal(resolveAvailableReturnRoute(route), APP_ROUTES.spot);
+  }
   assert.equal(resolveAvailableReturnRoute('/missing'), APP_ROUTES.spot);
   assert.equal(resolveAvailableReturnRoute('https://example.com'), APP_ROUTES.spot);
   assert.equal(resolveAvailableReturnRoute(null), APP_ROUTES.spot);

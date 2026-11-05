@@ -34,8 +34,9 @@ RUN npm run build
 
 # Stage 3: minimal runtime with only the traced server files and static assets.
 FROM base AS runner
+ARG PORT=3002
 ENV NODE_ENV=production \
-    PORT=3000 \
+    PORT=${PORT} \
     HOSTNAME=0.0.0.0 \
     NEXT_TELEMETRY_DISABLED=1
 
@@ -50,6 +51,6 @@ COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 
 USER nextjs
 
-EXPOSE 3000
+EXPOSE ${PORT}
 
 CMD ["node", "server.js"]

@@ -1,15 +1,17 @@
-// Browser fixtures in an isolated Chrome profile. Start the app on :3000 and
+// Browser fixtures in an isolated Chrome profile. Set LUMIX_TEST_ORIGIN and start
 // Chromium with remote debugging on :9239 before running this script.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { browserTestOrigin } = require('./helpers/browser-origin.cjs');
 
 const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
 
 (async () => {
+  const origin = browserTestOrigin();
   const pages = await fetch('http://127.0.0.1:9239/json').then(response => response.json());
-  const page = pages.find(candidate => candidate.url.startsWith('http://localhost:3000/'));
-  assert.ok(page, 'Open a localhost:3000 page in the test browser first.');
+  const page = pages.find(candidate => candidate.url.startsWith(origin + '/'));
+  assert.ok(page, 'Open the configured frontend origin in the test browser first.');
 
   const socket = new WebSocket(page.webSocketDebuggerUrl);
   await new Promise(resolve => socket.addEventListener('open', resolve));
@@ -93,7 +95,7 @@ const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, millise
   const address = 'GOPTIONS_DRAWER_BROWSER_TEST';
   const storageKey = `lumix:portfolio:v1:testnet:${address}`;
   const emptyRecords = { version: 1, wallet: address, network: 'testnet', spot: [], options: null, payments: [], outcomes: [] };
-  await call('Page.navigate', { url: 'http://localhost:3000/options' });
+  await call('Page.navigate', { url: origin + '/options' });
   await sleep(3500);
   await evaluate(`localStorage.setItem(${JSON.stringify(storageKey)}, ${JSON.stringify(JSON.stringify(emptyRecords))})`);
   assert.equal(await connectWallet(address), undefined);

@@ -1,8 +1,8 @@
-/* eslint-disable @typescript-eslint/no-require-imports -- Opt-in Node browser check. */
 // Runs against the local application. Never connects to an existing/user wallet.
 const { chromium } = require('@playwright/test');
 const { Keypair } = require('@stellar/stellar-sdk');
 const { installSpotTestWallet } = require('../tests/helpers/spot-wallet.cjs');
+const { browserTestOrigin } = require('../tests/helpers/browser-origin.cjs');
 const { circleTestnetEurc, mainnetOnly } = require('../components/spot-verified-assets.json');
 async function verifyNetwork() {
   const response = await fetch('https://horizon-testnet.stellar.org', { signal: AbortSignal.timeout(15000) });
@@ -63,6 +63,7 @@ async function swapPair(page, from, to, amount, report) {
   }
 }
 async function main() {
+  const appUrl = process.env.SPOT_TEST_URL || browserTestOrigin(process.env.SPOT_TEST_BASE_URL) + '/spot';
   await verifyNetwork();
   const trader = Keypair.random(); await fund(trader);
   console.log('Disposable Testnet account funded:', trader.publicKey());
@@ -73,7 +74,7 @@ async function main() {
   const errors = []; page.on('pageerror', error => errors.push(error.message.slice(0, 300)));
   const report = { checkedAt: new Date().toISOString(), account: trader.publicKey(), network: 'testnet', checks: [], swaps: [], errors };
   try {
-    await page.goto(process.env.SPOT_TEST_URL || 'http://localhost:3000/spot', { waitUntil: 'domcontentloaded' });
+    await page.goto(appUrl, { waitUntil: 'domcontentloaded' });
     await page.getByRole('button', { name: 'Connect wallet', exact: true }).last().click({ timeout: 30000 });
     await page.getByRole('button', { name: /Freighter/ }).click({ timeout: 20000 });
     await page.getByRole('button', { name: 'Approve test wallet request' }).click({ timeout: 20000 });

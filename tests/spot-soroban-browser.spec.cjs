@@ -34,9 +34,8 @@ async function setup(page, context, { apiEnabled = true, configError = false, na
   let hash, signedCall, nativeOperations, submissions = 0, requests = [], quoteError = false, accountReads = 0;
   const reports = [];
   let reportError = false, pausedReport, resumeReport;
-  await page.route('**/v1/spot/swaps/record', async route => {
-    const headers = { 'access-control-allow-origin': '*', 'access-control-allow-methods': 'POST, OPTIONS', 'access-control-allow-headers': 'Content-Type' };
-    if (route.request().method() === 'OPTIONS') return route.fulfill({ status: 204, headers });
+  await page.route('**/api/spot/swaps/record', async route => {
+    const headers = { 'cache-control': 'no-store' };
     reports.push({ url: route.request().url(), method: route.request().method(), contentType: route.request().headers()['content-type'], payload: route.request().postDataJSON() });
     if (pausedReport) await pausedReport;
     if (reportError) return route.abort();
@@ -166,7 +165,7 @@ test('without an API, Mainnet shows one native quote and submits only a Stellar 
 
 for (const source of ['native', 'soroban']) test(`${source} attribution receives 202 with the submitted Mainnet hash and sender`, async ({ page, context }) => {
   const state = await setup(page, context, { apiEnabled: source === 'soroban' });
-  const accepted = page.waitForResponse(response => response.url().includes('/v1/spot/swaps/record') && response.request().method() === 'POST');
+  const accepted = page.waitForResponse(response => new URL(response.url()).pathname === '/api/spot/swaps/record' && response.request().method() === 'POST');
   await page.getByRole('button', { name: 'Review swap', exact: true }).click();
   await page.getByRole('button', { name: 'Swap XLM for USDC', exact: true }).click();
   await page.getByRole('button', { name: 'Approve test wallet request', exact: true }).click();
@@ -174,7 +173,8 @@ for (const source of ['native', 'soroban']) test(`${source} attribution receives
   expect((await accepted).status()).toBe(202);
   expect(state.reports).toHaveLength(1);
   const report = state.reports[0];
-  expect(report.url).toBe((process.env.NEXT_PUBLIC_API_URL?.trim() || 'http://localhost:8080').replace(/\/+$/, '') + '/v1/spot/swaps/record');
+  expect(new URL(report.url).origin).toBe(new URL(page.url()).origin);
+  expect(new URL(report.url).pathname).toBe('/api/spot/swaps/record');
   expect(report.method).toBe('POST');
   expect(report.contentType).toBe('application/json');
   expect(report.payload.txHash).toBe(state.hash);

@@ -31,7 +31,8 @@ test('editable strikes respect the configured range and precision', () => {
   assert.match(validateOptionStrike(xlm, 0), /greater than zero/);
 });
 
-test('order submission rejects invalid strikes and retains valid custom strikes', () => {
+test('order submission rejects invalid strikes and retains valid custom strikes', t => {
+  t.mock.method(Date, 'now', () => Date.parse('2026-10-01T00:00:00Z'));
   const state = createInitialMarketState();
   const draft = {
     pairId: 'XLM-USDC',

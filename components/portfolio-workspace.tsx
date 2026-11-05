@@ -147,6 +147,7 @@ export function PortfolioWorkspace() {
   const [period, setPeriod] = useState<PnlPeriod>("1M");
   const [product, setProduct] = useState<Product>("Spot");
   const [now, setNow] = useState(0);
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- Initialize the client clock after deterministic SSR, then synchronize with the timer.
   useEffect(() => { setNow(Date.now()); const timer = window.setInterval(() => setNow(Date.now()), 60_000); return () => window.clearInterval(timer); }, []);
   return <>
     <header className="options-page-header"><div className="options-title-block"><h1>Portfolio</h1></div></header>

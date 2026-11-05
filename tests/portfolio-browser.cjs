@@ -1,12 +1,15 @@
 // Browser-only fixtures in an isolated Chrome profile, never production records.
-// Start the app on :3000 and headless Chrome with remote debugging on :9239.
+// Set LUMIX_TEST_ORIGIN to the running app; use an isolated browser on :9239.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { browserTestOrigin } = require('./helpers/browser-origin.cjs');
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 (async () => {
+  const origin = browserTestOrigin();
   const pages = await fetch('http://127.0.0.1:9239/json').then(r => r.json());
-  const page = pages.find(p => p.url.startsWith('http://localhost:3000/'));
+  const page = pages.find(p => p.url.startsWith(origin + '/'));
+  assert.ok(page, 'Open the configured frontend origin in the test browser first.');
   const ws = new WebSocket(page.webSocketDebuggerUrl);
   await new Promise(resolve => ws.addEventListener('open', resolve));
   let sequence = 0;
@@ -50,7 +53,7 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
     const now = Date.now();
     const base = { version: 1, wallet: address, network: 'testnet', spot: [], options: null, payments: [], outcomes: [] };
     await evaluate(`localStorage.setItem(${JSON.stringify(key)}, ${JSON.stringify(JSON.stringify(base))})`);
-    const navigate = async route => { await call('Page.navigate', { url: 'http://localhost:3000/' + route }); await sleep(4000); await wallet(address); };
+    const navigate = async route => { await call('Page.navigate', { url: origin + '/' + route }); await sleep(4000); await wallet(address); };
     await navigate('spot');
     await evaluate(`document.querySelector('.swap-primary-wrap button').click()`); await sleep(100);
     await click('.review-actions button', 'Swap XLM for USDC');
@@ -90,7 +93,7 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
     console.log('PASS: source Spot completion persists preview without hash or P&L; Options cancellation persists; removing Perps position keeps receipt; corrupt history blocks payment submission.');
     ws.close(); return;
   }
-  await call('Page.navigate', { url: 'http://localhost:3000/portfolio' });
+  await call('Page.navigate', { url: origin + '/portfolio' });
   await sleep(4000);
   await wallet(undefined);
   assert.match(await evaluate('document.body.innerText'), /Connect wallet to view your portfolio/);

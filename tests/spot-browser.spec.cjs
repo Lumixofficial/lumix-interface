@@ -1,4 +1,6 @@
 const { test, expect } = require('@playwright/test');
+require('@next/env').loadEnvConfig(process.cwd());
+const { SPOT_NETWORK_ID } = require('../components/spot-network.ts');
 const { Keypair } = require('@stellar/stellar-sdk');
 const extraIssuer = Keypair.random().publicKey();
 const otherIssuer = Keypair.random().publicKey();
@@ -11,6 +13,7 @@ const fakePath = (amount, output) => ({ _embedded: { records: [{ source_asset_ty
   destination_asset_type: 'credit_alphanum4', destination_asset_code: 'USDC', destination_asset_issuer: circleTestnetUsdc.issuer, destination_amount: output, path: [] }] } });
 
 test.beforeEach(async ({ page }) => {
+  test.skip(SPOT_NETWORK_ID !== 'testnet', 'Legacy Testnet-only workspace fixtures; the Mainnet suite covers the shipped Spot workspace.');
   await page.route('**/api/spot/quotes', route => route.fulfill({ json: { enabled: false } }));
   await page.route(horizon, route => route.fulfill({ json: { network_passphrase: 'Test SDF Network ; September 2015' } }));
   await page.route(horizon + '/ledgers?*', route => route.fulfill({ json: { _embedded: { records: [{ base_reserve_in_stroops: 5000000, base_fee_in_stroops: 100 }] } } }));

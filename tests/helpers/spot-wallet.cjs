@@ -5,9 +5,9 @@ async function installSpotTestWallet(context, keypair, { signingNetwork = Networ
   const address = keypair.publicKey();
   // Disposable transactions must never enter the real ingestion service.
   // Individual page routes can override this to inspect reporting behavior.
-  await context.route('**/v1/spot/swaps/record', route => route.fulfill({
-    status: route.request().method() === 'OPTIONS' ? 204 : 202,
-    headers: { 'access-control-allow-origin': '*', 'access-control-allow-methods': 'POST, OPTIONS', 'access-control-allow-headers': 'Content-Type' },
+  await context.route('**/api/spot/swaps/record', route => route.fulfill({
+    status: 202,
+    headers: { 'cache-control': 'no-store' },
     body: '',
   }));
   await context.exposeBinding('__spotWalletAction', async (_source, request) => {

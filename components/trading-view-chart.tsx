@@ -40,6 +40,7 @@ export function TradingViewChart({ asset }: { asset: string }) {
 
     if (!chartMarket) {
       iframeRef.current = null;
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- Mirror the lifecycle of the imperative third-party iframe, not React-owned DOM.
       setStatus("unsupported");
       return;
     }

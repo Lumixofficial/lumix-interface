@@ -168,20 +168,19 @@ test('native Mainnet quotes still execute as ordinary Stellar path payments', ()
       destination: address, destMin: m.minimumReceived('99', 30), path: [] })).setTimeout(180).build();
   assert.equal(m.inspectSpotEnvelope(tx.toXDR(), quote, 30, account, 5000000n).hash, m.spotEnvelopeHash(tx.toXDR(), 'mainnet'));
 });
-test('unconfigured quote proxy never contacts an upstream service', async t => {
+test('quote proxy uses the local backend fallback when server URLs are unset or blank', async t => {
   const { GET, POST } = require('../app/api/spot/quotes/route.ts');
-  const originalFetch = global.fetch, originalUrl = process.env.LUMIX_API_URL;
-  t.after(() => { global.fetch = originalFetch; if (originalUrl === undefined) delete process.env.LUMIX_API_URL; else process.env.LUMIX_API_URL = originalUrl; });
-  let calls = 0;
-  global.fetch = async () => { calls++; throw new Error('No API should be contacted'); };
+  const originalFetch = global.fetch, originalUrl = process.env.LUMIX_API_URL, originalApiUrl = process.env.API_URL;
+  t.after(() => { global.fetch = originalFetch; if (originalUrl === undefined) delete process.env.LUMIX_API_URL; else process.env.LUMIX_API_URL = originalUrl; if (originalApiUrl === undefined) delete process.env.API_URL; else process.env.API_URL = originalApiUrl; });
+  delete process.env.API_URL;
+  global.fetch = async url => { assert.equal(String(url), 'http://127.0.0.1:8080/v1/spot/quotes'); return Response.json(response()); };
   for (const url of [undefined, '', '   ']) {
     if (url === undefined) delete process.env.LUMIX_API_URL; else process.env.LUMIX_API_URL = url;
     const config = GET();
     assert.equal(config.headers.get('cache-control'), 'no-store');
-    assert.deepEqual(await config.json(), { enabled: false });
+    assert.deepEqual(await config.json(), { enabled: true });
     const result = await POST(new Request('http://localhost/api/spot/quotes', { method: 'POST', body: JSON.stringify(api.spotApiBody(request, 30)) }));
-    assert.equal(result.status, 503);
-    assert.equal(calls, 0);
+    assert.equal(result.status, 200);
   }
 });
 test('quote proxy preserves API body and errors without caching, and handles upstream failure', async t => {

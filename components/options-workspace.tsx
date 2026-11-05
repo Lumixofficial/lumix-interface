@@ -399,7 +399,7 @@ export function OptionsWorkspace() {
   const [expirationId, setExpirationId] = useState<ExpirationId>(optionExpirations[0].id);
   const [mobileSide, setMobileSide] = useState<MobileSide>("calls");
   const history = usePortfolioRecords(isAuthenticated ? address : undefined);
-  const publicMarket = useMemo(createPublicMarketState, []);
+  const publicMarket = useMemo(() => createPublicMarketState(), []);
   const marketState = history.data?.options ?? publicMarket;
   const setMarketState = (next: OptionsMarketState) => history.update((current) => ({ ...current, options: next }));
   const [drawerState, setDrawerState] = useState<DrawerState>();
@@ -409,6 +409,7 @@ export function OptionsWorkspace() {
   const expirationCountdown = useExpirationCountdown(expiration.timestamp);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Invalidate wallet-specific drawer state when the external wallet session changes.
     setDrawerState(undefined);
     setDrawerClosing(false);
   }, [address, isAuthenticated]);

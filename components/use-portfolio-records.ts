@@ -22,6 +22,7 @@ export function usePortfolioRecords(wallet: string | undefined) {
   }, [wallet]);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- Hydrate the wallet-scoped external storage only after SSR, then subscribe to changes.
     reload();
     const onStorage = (event: StorageEvent) => {
       if (event.key === null || (wallet && (event.key === portfolioStorageKey(wallet) || event.key === `${portfolioStorageKey(wallet)}:pending-payments`))) reload();

@@ -4,16 +4,21 @@ import { spotNetwork } from "./spot-network";
 import { inspectSorobanSpotEnvelope, sorobanSpotValidation } from "./spot-soroban";
 import { readSpotContractBalance } from "./spot-contract-token";
 import {
-  baseAccount, bluxAsset, BLUX_SWAP_FEE_PER_OPERATION, inspectSpotEnvelope, minimumReceived,
+  balanceLine, baseAccount, bluxAsset, BLUX_SWAP_FEE_PER_OPERATION, inspectSpotEnvelope, minimumReceived,
   parseSpotAmount, selectSpotPath, spotLedgerParameters, spotRead, spotValidation,
-  spotContractId, trustlineChange, verifySignedSpotEnvelope, verifySpotNetwork, type SpotAccount, type SpotAsset, type SpotPathRecord,
+  SpotHttpError, spotContractId, spotEnvelopeHash, trustlineChange, verifySignedSpotEnvelope, verifySpotNetwork, type SpotAccount, type SpotAsset, type SpotPathRecord,
 } from "./spot-utils";
 
-export type SpotSwapReview = { quote: SpotCandidate; bps: number; fee: bigint };
+export type SpotSwapReview = { quote: SpotCandidate; bps: number; fee: bigint; trustline?: { reserve: bigint; fee: bigint } };
 type SigningAccount = SpotAccount & { sequence: string; signers?: { key: string; type: string; weight: number }[] };
 type SpotSigner = (xdr: string, options: { network: string }) => Promise<unknown>;
 type SpotSubmission = { hash: string; expiresAt: number };
 export type SpotExecutionResult = { hash: string; raw: unknown; returnValue: () => Promise<{ amount_out?: bigint }> };
+export type SpotExecutionProgress = "trustline-wallet" | "trustline-pending" | "swap";
+type SpotExecutionOptions = {
+  onProgress?: (stage: SpotExecutionProgress) => void;
+  onTrustlineConfirmed?: (account: SpotAccount) => Promise<unknown>;
+};
 
 // Blux exposes the wallet's session network. The signing request also pins the
 // network, and the returned signature is checked against that network below.
@@ -56,9 +61,81 @@ export function verifySpotSignature(signedXdr: string, account: SigningAccount, 
   }
 }
 
+export function buildSpotTrustlineEnvelope(account: SigningAccount, asset: SpotAsset) {
+  if (asset.kind !== "classic" || balanceLine(account, asset)) throw new Error("A new classic receiving trustline is required.");
+  return new StellarSdk.TransactionBuilder(new StellarSdk.Account(account.account_id, account.sequence), {
+    networkPassphrase: spotNetwork(asset.network).passphrase, fee: BLUX_SWAP_FEE_PER_OPERATION.toString(),
+  }).addOperation(StellarSdk.Operation.changeTrust({ asset: sdkAsset(asset) })).setTimeout(180).build();
+}
+async function addSpotTrustline(review: SpotSwapReview, signTransaction: SpotSigner, options: SpotExecutionOptions) {
+  const { quote } = review, { from, to, account: address } = quote.request;
+  if (to.kind !== "classic") return;
+  const account = await spotRead<SigningAccount>(`/accounts/${address}`, undefined, from.network);
+  if (balanceLine(account, to)) return;
+  const parameters = await spotLedgerParameters(from.network);
+  if (!review.trustline || review.trustline.fee < BLUX_SWAP_FEE_PER_OPERATION || review.trustline.reserve < parameters.reserve) throw new Error("The receiving trustline changed. Review this swap again.");
+  const [metadata, contractBalance] = await Promise.all([
+    spotRead<{ _embedded: { records: { flags: { auth_required: boolean } }[] } }>(`/assets?asset_code=${encodeURIComponent(to.code)}&asset_issuer=${to.issuer}&limit=1`, undefined, from.network),
+    from.kind === "contract" ? readSpotContractBalance(from, address!) : undefined,
+  ]);
+  const flags = metadata._embedded.records[0]?.flags;
+  if (typeof flags?.auth_required !== "boolean") throw new Error("Asset permissions could not be checked. Refresh and try again.");
+  if (contractBalance !== undefined) account.contractBalances = { [spotContractId(from)]: contractBalance };
+  const error = sorobanSpotValidation(account, { ...quote, request: { ...quote.request, to: { ...to, authRequired: flags.auth_required } } }, parameters.reserve);
+  if (error) throw new Error(error);
+  const network = spotNetwork(from.network);
+  const transaction = buildSpotTrustlineEnvelope(account, to);
+  const checked = { hash: spotEnvelopeHash(transaction.toXDR(), from.network), expiresAt: Number(transaction.timeBounds!.maxTime) * 1000 };
+  assertSpotQuoteLive(quote);
+  assertWallet(address!, network.passphrase);
+  options.onProgress?.("trustline-wallet");
+  const signedXdr = await signTransaction(transaction.toXDR(), { network: network.passphrase });
+  if (typeof signedXdr !== "string" || !signedXdr) throw new Error("The wallet request was rejected or returned no signed transaction.");
+  await Promise.all([assertWallet(address!, network.passphrase), verifySpotNetwork(from.network)]);
+  verifySignedSpotEnvelope(signedXdr, checked, Date.now(), from.network);
+  verifySpotSignature(signedXdr, account, network.passphrase);
+  options.onProgress?.("trustline-pending");
+  // This hash is deliberately never passed to swap recovery or attribution.
+  let confirmed = false;
+  try {
+    const raw = await new StellarSdk.Horizon.Server(network.horizonUrl).submitTransaction(StellarSdk.TransactionBuilder.fromXDR(signedXdr, network.passphrase));
+    if (raw.hash !== checked.hash || raw.successful !== true || !Number.isInteger(raw.ledger)) throw new Error("Stellar returned an invalid trustline confirmation.");
+    confirmed = true;
+  } catch (error) {
+    if ((error as { response?: { data?: { extras?: { result_codes?: unknown } } } }).response?.data?.extras?.result_codes) throw error;
+    // Horizon may accept the transaction while its submission response is lost.
+    // Only an included, successful transaction allows the swap to continue.
+    for (let attempt = 0; attempt < 15; attempt++) {
+      let tx: { hash: string; successful: boolean; ledger: number } | undefined;
+      try {
+        tx = await spotRead<typeof tx>(`/transactions/${checked.hash}`, undefined, from.network);
+      } catch (confirmationError) {
+        if (!(confirmationError instanceof SpotHttpError && confirmationError.status === 404)) throw new Error("Trustline confirmation is unavailable. No swap was submitted. Refresh your balances before retrying.", { cause: confirmationError });
+      }
+      if (tx) {
+        if (tx.hash !== checked.hash || !Number.isInteger(tx.ledger) || typeof tx.successful !== "boolean") throw new Error("Stellar returned an invalid trustline confirmation. No swap was submitted.");
+        if (!tx.successful) throw new Error("The trustline transaction failed. No swap was submitted.");
+        confirmed = true;
+        break;
+      }
+      if (Date.now() >= checked.expiresAt) break;
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    }
+  }
+  if (!confirmed) throw new Error("Trustline confirmation is unavailable. No swap was submitted. Refresh your balances before retrying.");
+  const refreshed = await spotRead<SigningAccount>(`/accounts/${address}`, undefined, from.network);
+  await options.onTrustlineConfirmed?.(refreshed);
+  if (!balanceLine(refreshed, to)) throw new Error("The confirmed trustline is not available yet. Refresh your balances before retrying.");
+  if (balanceLine(refreshed, to)?.is_authorized === false) throw new Error("This asset requires issuer authorization before it can be swapped.");
+  return refreshed;
+}
+function assertSpotQuoteLive(quote: SpotCandidate) {
+  if (quote.soroban && Date.parse(quote.soroban.expiresAt) <= Date.now() + 5000) throw new Error("This quote expired. Refresh and review the swap again.");
+}
+
 // Build and inspect locally, sign through Blux React's public API, then verify
 // the signed body before broadcasting. No SDK files or private APIs are patched.
-export async function executeSpotSwap(review: SpotSwapReview, signTransaction: SpotSigner, onSigned: (submission: SpotSubmission) => void, onSubmitted?: (hash: string) => void): Promise<SpotExecutionResult> {
+export async function executeSpotSwap(review: SpotSwapReview, signTransaction: SpotSigner, onSigned: (submission: SpotSubmission) => void, onSubmitted?: (hash: string) => void, options: SpotExecutionOptions = {}): Promise<SpotExecutionResult> {
   const { quote } = review;
   const address = quote.request.account;
   if (!address) throw new Error("Connect your wallet before swapping.");
@@ -67,9 +144,14 @@ export async function executeSpotSwap(review: SpotSwapReview, signTransaction: S
   let xdr: string;
   const rpc = new StellarSdk.rpc.Server(network.sorobanRpcUrl);
   if (quote.source === "soroban" && quote.soroban) {
+    assertSpotQuoteLive(quote);
+    const refreshed = await addSpotTrustline(review, signTransaction, options);
+    assertSpotQuoteLive(quote);
+    assertWallet(address, network.passphrase);
+    options.onProgress?.("swap");
     const call = quote.soroban.txData;
     const [source, client] = await Promise.all([
-      rpc.getAccount(address),
+      refreshed ? new StellarSdk.Account(address, refreshed.sequence) : rpc.getAccount(address),
       StellarSdk.contract.Client.from({ contractId: call.address, networkPassphrase: network.passphrase, rpcUrl: network.sorobanRpcUrl, server: rpc }),
     ]);
     const inputs = client.spec.getFunc(call.fn).inputs;
@@ -91,6 +173,7 @@ export async function executeSpotSwap(review: SpotSwapReview, signTransaction: S
     quote.request.from.kind === "contract" ? readSpotContractBalance(quote.request.from, address) : undefined,
   ]);
   if (contractBalance !== undefined) account.contractBalances = { [spotContractId(quote.request.from)]: contractBalance };
+  if (quote.source === "soroban" && quote.request.to.kind === "classic" && !balanceLine(account, quote.request.to)) throw new Error("The receiving trustline changed. Refresh and review this swap again.");
   const error = quote.source === "soroban" ? sorobanSpotValidation(account, quote, parameters.reserve)
     : spotValidation(account, quote.request, parameters.reserve, quote.output);
   if (error) throw new Error(error);

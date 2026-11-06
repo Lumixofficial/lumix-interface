@@ -14,7 +14,8 @@ const section = Buffer.concat([leb(name.length), name, ...entries.map(value => B
 const wasm = Buffer.concat([Buffer.from([0, 97, 115, 109, 1, 0, 0, 0, 0]), leb(section.length), section]);
 
 async function setup(page, context, { apiEnabled = true, configError = false, nativeAlternatives = false, apiMinimum, apiOutput = '102', apiSplit = true, apiOutputs, shares, nativeOutput = '100', connect = true, loseSubmitResponse = true,
-  contractTokens = {}, contractBalance = 5000000000n, contractOutput } = {}) {
+  contractTokens = {}, contractBalance = 5000000000n, contractOutput,
+  missingTrustline = false, nativeBalance = '10000', authRequired = false, trustlineSubmit = 'success' } = {}) {
   const attributionLogs = [];
   const pageErrors = [], rpcRequests = [], pathRequests = [];
   page.on('pageerror', error => pageErrors.push(error.message));
@@ -36,6 +37,8 @@ async function setup(page, context, { apiEnabled = true, configError = false, na
       ? { status: 404, error: 'Unexpected mocked Blux endpoint.' } : { status: 200, message: 'Fixture', result } });
   });
   let hash, signedCall, nativeOperations, submissions = 0, requests = [], quoteError = false, accountReads = 0;
+  const envelopes = [], confirmations = new Map();
+  let pausedTrustline, resumeTrustline;
   const reports = [];
   let reportError = false, pausedReport, resumeReport;
   await page.route('**/api/spot/swaps/record', async route => {
@@ -47,8 +50,16 @@ async function setup(page, context, { apiEnabled = true, configError = false, na
   });
   const account = { account_id: address, id: address, sequence: '10000', subentry_count: 1, data_attr: {},
     thresholds: { low_threshold: 1, med_threshold: 1, high_threshold: 1 }, signers: [], flags: { auth_required: false },
-    balances: [{ asset_type: 'native', balance: '10000', selling_liabilities: '0', buying_liabilities: '0' },
+    balances: [{ asset_type: 'native', balance: nativeBalance, selling_liabilities: '0', buying_liabilities: '0' },
       { asset_type: 'credit_alphanum4', asset_code: 'USDC', asset_issuer: issuer, balance: '1000', limit: '1000000', selling_liabilities: '0', buying_liabilities: '0', is_authorized: true }] };
+  if (missingTrustline) { account.balances.pop(); account.subentry_count = 0; }
+  function applyTrustline(operation) {
+    if (!account.balances.some(line => line.asset_code === operation.line.code && line.asset_issuer === operation.line.issuer)) {
+      account.balances.push({ asset_type: operation.line.code.length <= 4 ? 'credit_alphanum4' : 'credit_alphanum12',
+        asset_code: operation.line.code, asset_issuer: operation.line.issuer, balance: '0', limit: operation.limit, is_authorized: true });
+      account.subentry_count++;
+    }
+  }
   // Fulfill every chain request locally. No transaction leaves the test browser.
   await page.route('https://horizon-testnet.stellar.org/**', route => {
     const path = new URL(route.request().url()).pathname;
@@ -56,12 +67,12 @@ async function setup(page, context, { apiEnabled = true, configError = false, na
       : path === '/ledgers' ? { _embedded: { records: [{ base_reserve_in_stroops: 5000000, base_fee_in_stroops: 100 }] } }
       : path.startsWith('/accounts/') ? account : { _embedded: { records: [] } } });
   });
-  await page.route(horizon + '/**', route => {
+  await page.route(horizon + '/**', async route => {
     const url = new URL(route.request().url());
     if (url.pathname === '/') return route.fulfill({ json: { network_passphrase: Networks.PUBLIC } });
     if (url.pathname.startsWith('/accounts/')) { accountReads++; return route.fulfill({ json: account }); }
     if (url.pathname === '/ledgers') return route.fulfill({ json: { _embedded: { records: [{ base_reserve_in_stroops: 5000000, base_fee_in_stroops: 100, closed_at: new Date().toISOString() }] } } });
-    if (url.pathname === '/assets') return route.fulfill({ json: { _embedded: { records: [{ asset_code: 'USDC', asset_issuer: issuer, flags: { auth_required: false } }] } } });
+    if (url.pathname === '/assets') return route.fulfill({ json: { _embedded: { records: [{ asset_code: url.searchParams.get('asset_code') ?? 'USDC', asset_issuer: url.searchParams.get('asset_issuer') ?? issuer, flags: { auth_required: authRequired } }] } } });
     if (url.pathname === '/paths/strict-send') {
       pathRequests.push(url.href);
       const direct = { source_asset_type: 'native', source_amount: url.searchParams.get('source_amount'), destination_asset_type: 'credit_alphanum4', destination_asset_code: 'USDC', destination_asset_issuer: issuer, destination_amount: nativeOutput, path: [] };
@@ -70,10 +81,24 @@ async function setup(page, context, { apiEnabled = true, configError = false, na
     }
     if (url.pathname === '/transactions' && route.request().method() === 'POST') {
       const tx = TransactionBuilder.fromXDR(new URLSearchParams(route.request().postData()).get('tx'), Networks.PUBLIC);
+      envelopes.push(tx);
+      if (tx.operations.length === 1 && tx.operations[0].type === 'changeTrust') {
+        const trustlineHash = Buffer.from(tx.hash()).toString('hex');
+        if (pausedTrustline) await pausedTrustline;
+        if (trustlineSubmit === 'failed') return route.fulfill({ status: 400, json: { extras: { result_codes: { transaction: 'tx_failed', operations: ['op_low_reserve'] } } } });
+        applyTrustline(tx.operations[0]); account.sequence = tx.sequence;
+        account.balances[0].balance = String(Number(account.balances[0].balance) - 0.01);
+        const confirmation = { hash: trustlineHash, successful: true, fee_charged: '100000', ledger: 123455 };
+        confirmations.set(trustlineHash, confirmation);
+        if (trustlineSubmit === 'lost') return route.abort();
+        return route.fulfill({ json: confirmation });
+      }
       submissions++; nativeOperations = tx.operations; hash = Buffer.from(tx.hash()).toString('hex');
+      tx.operations.filter(operation => operation.type === 'changeTrust').forEach(applyTrustline);
       account.balances[1].balance = '1100';
       return route.fulfill({ json: { hash, successful: true, fee_charged: '100000', ledger: 123456 } });
     }
+    if (confirmations.has(url.pathname.split('/').at(-1))) return route.fulfill({ json: confirmations.get(url.pathname.split('/').at(-1)) });
     if (url.pathname === '/transactions/' + hash) return route.fulfill({ json: { hash, successful: true, fee_charged: '1100', ledger: 123456 } });
     return route.fulfill({ json: { _embedded: { records: [] } } });
   });
@@ -115,8 +140,8 @@ async function setup(page, context, { apiEnabled = true, configError = false, na
     if (request.method === 'getLedgerEntries') {
       const records = request.params.keys.map(key => {
         const decoded = xdr.LedgerKey.fromXDR(key, 'base64'); let entry;
-        if (decoded.type === 'account') entry = xdr.LedgerEntryData.account(new xdr.AccountEntry({ accountId: trader.xdrPublicKey(), balance: 100000000000n, seqNum: 10000n,
-          numSubEntries: 1, inflationDest: null, flags: 0, homeDomain: '', thresholds: Buffer.from([1, 1, 1, 1]), signers: [], ext: xdr.AccountEntryExt.v0() }));
+        if (decoded.type === 'account') entry = xdr.LedgerEntryData.account(new xdr.AccountEntry({ accountId: trader.xdrPublicKey(), balance: 100000000000n, seqNum: BigInt(account.sequence),
+          numSubEntries: account.subentry_count, inflationDest: null, flags: 0, homeDomain: '', thresholds: Buffer.from([1, 1, 1, 1]), signers: [], ext: xdr.AccountEntryExt.v0() }));
         else if (decoded.type === 'contractData') entry = xdr.LedgerEntryData.contractData(new xdr.ContractDataEntry({ ext: xdr.ExtensionPoint.v0(),
           contract: Address.fromString(aggregator).toScAddress(), key: xdr.ScVal.scvLedgerKeyContractInstance(), durability: xdr.ContractDataDurability.persistent,
           val: xdr.ScVal.scvContractInstance(new xdr.ScContractInstance({ executable: xdr.ContractExecutable.contractExecutableWasm(Buffer.alloc(32, 7)), storage: null })) }));
@@ -134,8 +159,9 @@ async function setup(page, context, { apiEnabled = true, configError = false, na
     else if (request.method === 'sendTransaction') {
       submissions++;
       const tx = TransactionBuilder.fromXDR(request.params.transaction, Networks.PUBLIC);
+      envelopes.push(tx);
       hash = Buffer.from(tx.hash()).toString('hex'); signedCall = tx.operations[0].func.invokeContract;
-      account.balances[1].balance = '1102';
+      if (account.balances[1]) account.balances[1].balance = '1102';
       // Lost replies recover through Horizon without another signature.
       if (loseSubmitResponse) return route.abort();
       result = { hash, status: 'PENDING', latestLedger: 100, latestLedgerCloseTime: String(Math.floor(Date.now() / 1000)) };
@@ -153,7 +179,9 @@ async function setup(page, context, { apiEnabled = true, configError = false, na
   }
   await page.locator('#pay-amount').fill('100');
   await expect(page.getByRole('radio')).toHaveCount(Math.min(3, 1 + (apiEnabled && !configError ? apiOutputs?.length ?? 1 : 0)));
-  return { requests, reports, attributionLogs, pageErrors, rpcRequests, pathRequests, address, account, get hash() { return hash; }, get accountReads() { return accountReads; }, get restoreReads() { return restoreReads; }, get submissions() { return submissions; }, get signedCall() { return signedCall; }, get nativeOperations() { return nativeOperations; }, setQuoteError: () => { quoteError = true; }, setRestoreError: () => { restoreError = true; },
+  return { requests, reports, attributionLogs, pageErrors, rpcRequests, pathRequests, address, account, envelopes, get hash() { return hash; }, get accountReads() { return accountReads; }, get restoreReads() { return restoreReads; }, get submissions() { return submissions; }, get signedCall() { return signedCall; }, get nativeOperations() { return nativeOperations; }, setQuoteError: () => { quoteError = true; }, setRestoreError: () => { restoreError = true; },
+    pauseTrustline: () => { pausedTrustline = new Promise(resolve => { resumeTrustline = resolve; }); },
+    resumeTrustline: () => { resumeTrustline?.(); pausedTrustline = undefined; },
     setReportError: () => { reportError = true; },
     pauseReport: () => { pausedReport = new Promise(resolve => { resumeReport = resolve; }); },
     resumeReport: () => { resumeReport?.(); pausedReport = undefined; },
@@ -161,6 +189,150 @@ async function setup(page, context, { apiEnabled = true, configError = false, na
     resumeRestore: () => { resumeRestore?.(); pausedRestore = undefined; },
   };
 }
+
+const swapSimulations = state => state.rpcRequests.filter(request => request.method === 'simulateTransaction'
+  && TransactionBuilder.fromXDR(request.params.transaction, Networks.PUBLIC).operations[0].func.invokeContract.functionName.toString() === 'swap_exact_in');
+
+for (const trustlineSubmit of ['success', 'lost']) test(`automatic trustline confirms before Soroban simulation (${trustlineSubmit} response)`, async ({ page, context }) => {
+  if (trustlineSubmit === 'lost') await page.setViewportSize({ width: 390, height: 844 });
+  const state = await setup(page, context, { missingTrustline: true, trustlineSubmit });
+  state.pauseTrustline();
+  await expect(page.getByRole('alert').filter({ hasText: 'Swap prerequisites' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Review swap', exact: true })).toBeEnabled();
+  await page.getByRole('button', { name: 'Review swap', exact: true }).click();
+  const dialog = page.locator('[data-spot-review] .review-modal');
+  await expect(dialog).toContainText('Two wallet approvals');
+  await expect(dialog).toContainText('Up to 1.01 XLM');
+  await page.screenshot({ path: `.impeccable/review/spot-trustline-review-${trustlineSubmit}.png`, fullPage: true, animations: 'disabled' });
+  await dialog.getByRole('button', { name: 'Swap XLM for USDC', exact: true }).click();
+  await expect(dialog.getByRole('heading', { name: 'Adding USDC trustline…' })).toBeVisible();
+  expect(swapSimulations(state)).toHaveLength(0);
+  await page.getByRole('button', { name: 'Approve test wallet request', exact: true }).click();
+  await expect(dialog.getByText('Confirming trustline', { exact: true })).toBeVisible();
+  await expect.poll(() => state.envelopes.length).toBe(1);
+  expect(swapSimulations(state)).toHaveLength(0);
+  expect(state.reports).toHaveLength(0);
+  expect(state.envelopes[0].operations.map(operation => operation.type)).toEqual(['changeTrust']);
+  await page.screenshot({ path: `.impeccable/review/spot-trustline-pending-${trustlineSubmit}.png`, fullPage: true, animations: 'disabled' });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  state.resumeTrustline();
+  await expect(dialog.getByRole('heading', { name: 'Approve in wallet' })).toBeVisible();
+  await expect.poll(() => swapSimulations(state).length).toBe(1);
+  const simulation = TransactionBuilder.fromXDR(swapSimulations(state)[0].params.transaction, Networks.PUBLIC);
+  expect(simulation.sequence).toBe('10002');
+  expect(state.account.sequence).toBe('10001');
+  await expect(page.locator('.receive-card .amount-card-balance')).toContainText('0.00 USDC');
+  expect(state.reports).toHaveLength(0);
+  await page.getByRole('button', { name: 'Approve test wallet request', exact: true }).click();
+  await expect(dialog.getByRole('heading', { name: 'Swap complete' })).toBeVisible();
+  expect(state.envelopes.map(tx => tx.operations.map(operation => operation.type))).toEqual([['changeTrust'], ['invokeHostFunction']]);
+  expect(state.submissions).toBe(1);
+  await expect.poll(() => state.reports.length).toBe(1);
+  expect(state.reports[0].payload.txHash).toBe(state.hash);
+  expect(state.reports[0].payload.txHash).not.toBe(Buffer.from(state.envelopes[0].hash()).toString('hex'));
+  await expect(page.locator('.receive-card .amount-card-balance')).toContainText('1,102.00 USDC');
+  expect(state.pageErrors).toEqual([]);
+});
+
+for (const signature of ['trustline', 'swap']) test(`automatic trustline handles rejection of the ${signature} signature`, async ({ page, context }) => {
+  const state = await setup(page, context, { missingTrustline: true });
+  await page.getByRole('button', { name: 'Review swap', exact: true }).click();
+  await page.getByRole('button', { name: 'Swap XLM for USDC', exact: true }).click();
+  if (signature === 'swap') {
+    await page.getByRole('button', { name: 'Approve test wallet request', exact: true }).click();
+    await expect(page.getByRole('heading', { name: 'Approve in wallet' })).toBeVisible();
+  }
+  await page.getByRole('button', { name: 'Reject test wallet request', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Swap cancelled' })).toBeVisible();
+  expect(state.submissions).toBe(0); expect(state.reports).toHaveLength(0);
+  expect(state.envelopes).toHaveLength(signature === 'swap' ? 1 : 0);
+  expect(swapSimulations(state)).toHaveLength(signature === 'swap' ? 1 : 0);
+  await page.getByRole('button', { name: 'Close swap dialog' }).click();
+  await expect(page.locator('#pay-amount')).toBeEnabled();
+  if (signature === 'swap') await expect(page.locator('.receive-card .amount-card-balance')).toContainText('0.00 USDC');
+  await expect(page.getByRole('button', { name: 'Review swap', exact: true })).toBeEnabled();
+});
+
+test('automatic trustline reserve and fee budget sets MAX without a missing-trustline blocker', async ({ page, context }) => {
+  const state = await setup(page, context, { missingTrustline: true, nativeBalance: '102.5099999' });
+  await expect(page.getByRole('button', { name: 'Check balance and reserves', exact: true })).toBeDisabled();
+  await expect(page.locator('.spot-status')).toContainText('additional 0.5 XLM trustline reserve');
+  await page.getByRole('button', { name: 'MAX', exact: true }).click();
+  await expect(page.locator('#pay-amount')).toHaveValue('99.9999999');
+  await expect(page.getByRole('button', { name: 'Review swap', exact: true })).toBeEnabled();
+  expect(state.submissions).toBe(0);
+});
+
+test('automatic trustline preserves issuer authorization blockers', async ({ page, context }) => {
+  const state = await setup(page, context, { missingTrustline: true, authRequired: true });
+  await expect(page.locator('.spot-status')).toContainText('issuer authorization');
+  await expect(page.getByRole('button', { name: 'Check balance and reserves', exact: true })).toBeDisabled();
+  expect(state.envelopes).toHaveLength(0);
+});
+
+test('automatic trustline stops after a failed classic submission', async ({ page, context }) => {
+  const state = await setup(page, context, { missingTrustline: true, trustlineSubmit: 'failed' });
+  await page.getByRole('button', { name: 'Review swap', exact: true }).click();
+  await page.getByRole('button', { name: 'Swap XLM for USDC', exact: true }).click();
+  await page.getByRole('button', { name: 'Approve test wallet request', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Swap not completed' })).toBeVisible();
+  expect(swapSimulations(state)).toHaveLength(0);
+  expect(state.submissions).toBe(0); expect(state.reports).toHaveLength(0);
+});
+
+test('automatic trustline requires on-chain confirmation even if its balance entry exists', async ({ page, context }) => {
+  const state = await setup(page, context, { missingTrustline: true, trustlineSubmit: 'lost' });
+  await page.route(horizon + '/transactions/*', route => route.fulfill({ status: 503, json: { error: 'Confirmation unavailable' } }));
+  await page.getByRole('button', { name: 'Review swap', exact: true }).click();
+  await page.getByRole('button', { name: 'Swap XLM for USDC', exact: true }).click();
+  await page.getByRole('button', { name: 'Approve test wallet request', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Swap not completed' })).toBeVisible();
+  await expect(page.locator('.review-modal')).toContainText('Trustline confirmation is unavailable. No swap was submitted.');
+  expect(swapSimulations(state)).toHaveLength(0);
+  expect(state.envelopes).toHaveLength(1); expect(state.reports).toHaveLength(0);
+});
+
+test('automatic trustline does not reuse a quote that expires during confirmation', async ({ page, context }) => {
+  const state = await setup(page, context, { missingTrustline: true });
+  await page.clock.install();
+  state.pauseTrustline();
+  await page.getByRole('button', { name: 'Review swap', exact: true }).click();
+  await page.getByRole('button', { name: 'Swap XLM for USDC', exact: true }).click();
+  await page.getByRole('button', { name: 'Approve test wallet request', exact: true }).click();
+  await expect.poll(() => state.envelopes.length).toBe(1);
+  await page.clock.setSystemTime(new Date(Date.now() + 125000));
+  state.resumeTrustline();
+  await expect(page.getByRole('heading', { name: 'Swap not completed' })).toBeVisible();
+  await expect(page.locator('.review-modal')).toContainText('This quote expired');
+  expect(swapSimulations(state)).toHaveLength(0); expect(state.reports).toHaveLength(0);
+});
+
+test('automatic trustline remains bundled for a classic path-payment route', async ({ page, context }) => {
+  const state = await setup(page, context, { missingTrustline: true, apiEnabled: false });
+  await page.getByRole('button', { name: 'Review swap', exact: true }).click();
+  await page.getByRole('button', { name: 'Swap XLM for USDC', exact: true }).click();
+  await page.getByRole('button', { name: 'Approve test wallet request', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Swap complete' })).toBeVisible();
+  expect(state.envelopes.map(tx => tx.operations.map(operation => operation.type))).toEqual([['changeTrust', 'pathPaymentStrictSend']]);
+  expect(swapSimulations(state)).toHaveLength(0); expect(state.submissions).toBe(1);
+});
+
+for (const destination of ['native', 'SEP-41']) test(`automatic trustline is skipped for a ${destination} destination`, async ({ page, context }) => {
+  const state = await setup(page, context);
+  if (destination === 'native') await page.getByRole('button', { name: 'Reverse XLM and USDC' }).click();
+  else {
+    await page.getByRole('button', { name: /Choose receive asset:/ }).click();
+    await page.getByRole('searchbox').fill('HAHA');
+    await page.getByRole('option', { name: /HAHA, HahaToken/ }).click();
+  }
+  await expect(page.getByRole('button', { name: 'Review swap', exact: true })).toBeEnabled();
+  await page.getByRole('button', { name: 'Review swap', exact: true }).click();
+  await expect(page.locator('.review-modal')).not.toContainText('Two wallet approvals');
+  await page.getByRole('button', { name: destination === 'native' ? 'Swap USDC for XLM' : 'Swap XLM for HAHA', exact: true }).click();
+  await page.getByRole('button', { name: 'Approve test wallet request', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Swap complete' })).toBeVisible();
+  expect(state.envelopes.map(tx => tx.operations.map(operation => operation.type))).toEqual([['invokeHostFunction']]);
+});
 
 test('without an API, Mainnet shows one native quote and submits only a Stellar path payment', async ({ page, context }) => {
   const state = await setup(page, context, { apiEnabled: false });

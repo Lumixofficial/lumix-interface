@@ -1,5 +1,5 @@
 import { Address, Transaction, TransactionBuilder, scValToNative } from "@stellar/stellar-sdk/base";
-import { availableAsset, balanceLine, parseSpotAmount, parseSpotAssetAmount, spotAsset, spotContractId, spotEnvelopeHash, type SpotAccount } from "./spot-utils";
+import { availableAsset, balanceLine, BLUX_SWAP_FEE_PER_OPERATION, parseSpotAmount, parseSpotAssetAmount, spotAsset, spotContractId, spotEnvelopeHash, type SpotAccount } from "./spot-utils";
 import { spotNetwork } from "./spot-network";
 import type { SpotCandidate } from "./spot-api";
 
@@ -12,11 +12,14 @@ export function sorobanSpotValidation(account: SpotAccount, quote: Pick<SpotCand
   if (from.kind === "contract" && account.contractBalances?.[spotContractId(from)] === undefined) return "Contract token balance is unavailable. Refresh and try again.";
   if (from.kind !== "contract" && (!source || source.is_authorized === false) || destination?.is_authorized === false) return "Check your token balance and issuer authorization.";
   if (parseSpotAssetAmount(amount, from) > availableAsset(account, from)) return "Insufficient available balance after open-offer liabilities.";
-  if (to.kind === "classic" && !destination) return `Add the ${to.code} trustline in your wallet before using a Soroban route.`;
+  const needsTrustline = to.kind === "classic" && !destination;
+  if (needsTrustline && to.authRequired) return "This asset requires issuer authorization before it can be swapped.";
   if (destination && to.kind === "classic" && parseSpotAmount(destination.balance) + parseSpotAmount(destination.buying_liabilities ?? "0") + parseSpotAmount(quote.output) > parseSpotAmount(destination.limit ?? "922337203685.4775807")) return "Increase the receiving trustline limit in your wallet before using this route.";
-  const entries = Math.max(0, 2 + account.subentry_count + (account.num_sponsoring ?? 0) - (account.num_sponsored ?? 0));
-  const needed = BigInt(entries) * reserve + SOROBAN_SPOT_FEE_CAP + (from.kind === "native" ? parseSpotAmount(amount) : BigInt(0));
-  if (availableAsset(account, spotAsset("XLM", undefined, from.network)) < needed) return "Keep enough XLM for reserves and the Soroban network fee limit (1 XLM).";
+  const entries = Math.max(0, 2 + account.subentry_count + (account.num_sponsoring ?? 0) - (account.num_sponsored ?? 0) + Number(needsTrustline));
+  const needed = BigInt(entries) * reserve + SOROBAN_SPOT_FEE_CAP + (needsTrustline ? BLUX_SWAP_FEE_PER_OPERATION : BigInt(0)) + (from.kind === "native" ? parseSpotAmount(amount) : BigInt(0));
+  if (availableAsset(account, spotAsset("XLM", undefined, from.network)) < needed) return needsTrustline
+    ? "Keep enough XLM for the additional 0.5 XLM trustline reserve, its fee, and the Soroban network fee limit (1 XLM)."
+    : "Keep enough XLM for reserves and the Soroban network fee limit (1 XLM).";
 }
 function canonical(value: unknown): string {
   // Generic XDR decoding represents a void union as ["Soroswap"], while

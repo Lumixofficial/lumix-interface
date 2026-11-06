@@ -186,13 +186,24 @@ test('changed aggregator, arguments, extra operations, excessive fee and expiry 
   assert.throws(() => soroban.inspectSorobanSpotEnvelope(envelope(quote, { extra: Operation.payment({ destination: address, asset: Asset.native(), amount: '1' }) }).toXDR(), quote), /does not match/);
   assert.throws(() => soroban.inspectSorobanSpotEnvelope(envelope(quote).toXDR(), quote, Date.parse(quote.soroban.expiresAt)), /expired/);
 });
-test('Soroban prerequisites require receiving trustline and reserve plus simulated fee budget', () => {
+test('Soroban prerequisites allow automatic trustlines while reserving the extra entry and both fees', () => {
   const quote = candidate(), balances = [{ asset_type: 'native', balance: '102' }];
   const account = { account_id: address, subentry_count: 1, balances };
-  assert.match(soroban.sorobanSpotValidation(account, quote, 5000000n), /trustline/);
+  assert.match(soroban.sorobanSpotValidation(account, quote, 5000000n), /additional 0.5 XLM/);
+  balances[0].balance = '103.0099999';
+  assert.match(soroban.sorobanSpotValidation(account, quote, 5000000n), /additional 0.5 XLM/);
+  balances[0].balance = '103.01';
+  assert.equal(soroban.sorobanSpotValidation(account, quote, 5000000n), undefined);
+  const restricted = { ...quote, request: { ...quote.request, to: { ...quote.request.to, authRequired: true } } };
+  assert.match(soroban.sorobanSpotValidation(account, restricted, 5000000n), /issuer authorization/);
   balances.push({ asset_type: 'credit_alphanum4', asset_code: 'USDC', asset_issuer: issuer, balance: '0', limit: '100000' });
+  balances[0].balance = '102';
   assert.match(soroban.sorobanSpotValidation(account, quote, 5000000n), /1 XLM/);
   balances[0].balance = '103'; assert.equal(soroban.sorobanSpotValidation(account, quote, 5000000n), undefined);
+  balances[1].is_authorized = false;
+  assert.match(soroban.sorobanSpotValidation(account, quote, 5000000n), /authorization/);
+  balances[1].is_authorized = true; balances[1].limit = '1';
+  assert.match(soroban.sorobanSpotValidation(account, quote, 5000000n), /trustline limit/);
 });
 test('native Mainnet quotes still execute as ordinary Stellar path payments', () => {
   const path = { source_asset_type: 'native', source_amount: '100', destination_asset_type: 'credit_alphanum4',

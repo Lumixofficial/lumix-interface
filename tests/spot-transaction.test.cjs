@@ -17,7 +17,7 @@ const executionRequire = executionModule.require.bind(executionModule);
 executionModule.require = id => id === '@bluxcc/react' ? { StellarSdk: require('@stellar/stellar-sdk') } : executionRequire(id);
 executionModule._compile(ts.transpileModule(fs.readFileSync(executionPath, 'utf8'),
   { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText, executionPath);
-const { buildNativeSpotEnvelope, verifySpotSignature } = executionModule.exports;
+const { buildNativeSpotEnvelope, buildSpotTrustlineEnvelope, verifySpotSignature } = executionModule.exports;
 const { inspectSpotEnvelope, spotEnvelopeHash, verifySignedSpotEnvelope } = require('../components/spot-utils.ts');
 const trader = Keypair.random(); const stranger = Keypair.random();
 const to = m.spotAsset('USDC', m.CIRCLE_TESTNET_USDC);
@@ -114,4 +114,21 @@ test('signature validation rejects unsigned, wrong-account and wrong-network wal
   assert.throws(() => verifySpotSignature(wrongAccount.toXDR(), account, Networks.TESTNET), /no valid signature/);
   const wrongNetwork = build({ network: Networks.PUBLIC }); wrongNetwork.sign(trader);
   assert.throws(() => verifySpotSignature(wrongNetwork.toXDR(), account, Networks.TESTNET), /no valid signature/);
+});
+test('a separate trustline envelope has only the selected ChangeTrust, its own sequence, expiry and fee', () => {
+  const tx = buildSpotTrustlineEnvelope({ ...account, sequence: '100' }, to);
+  assert.deepEqual(tx.operations.map(operation => operation.type), ['changeTrust']);
+  assert.equal(tx.operations[0].line.code, to.code); assert.equal(tx.operations[0].line.issuer, to.issuer);
+  assert.equal(tx.source, trader.publicKey()); assert.equal(tx.sequence, '101');
+  assert.equal(tx.fee, '100000'); assert.equal(tx.memo.type, 'none');
+  const expected = { hash: spotEnvelopeHash(tx.toXDR()), expiresAt: Number(tx.timeBounds.maxTime) * 1000 };
+  tx.sign(trader);
+  assert.doesNotThrow(() => verifySignedSpotEnvelope(tx.toXDR(), expected));
+  assert.doesNotThrow(() => verifySpotSignature(tx.toXDR(), account, Networks.TESTNET));
+  const changed = buildSpotTrustlineEnvelope({ ...account, sequence: '100' }, m.spotAsset('OTHER', stranger.publicKey()));
+  changed.sign(trader);
+  assert.throws(() => verifySignedSpotEnvelope(changed.toXDR(), expected), /wallet changed/);
+  assert.throws(() => buildSpotTrustlineEnvelope({ ...account, sequence: '100' }, m.spotAsset('XLM')), /classic/);
+  const trusted = { ...account, sequence: '100', balances: [...account.balances, { asset_type: 'credit_alphanum4', asset_code: to.code, asset_issuer: to.issuer, balance: '0' }] };
+  assert.throws(() => buildSpotTrustlineEnvelope(trusted, to), /new classic/);
 });

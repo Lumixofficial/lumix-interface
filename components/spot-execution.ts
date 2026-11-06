@@ -2,10 +2,11 @@ import { getState, getStrictSendPaths, StellarSdk } from "@bluxcc/react";
 import type { SpotCandidate } from "./spot-api";
 import { spotNetwork } from "./spot-network";
 import { inspectSorobanSpotEnvelope, sorobanSpotValidation } from "./spot-soroban";
+import { readSpotContractBalance } from "./spot-contract-token";
 import {
   baseAccount, bluxAsset, BLUX_SWAP_FEE_PER_OPERATION, inspectSpotEnvelope, minimumReceived,
   parseSpotAmount, selectSpotPath, spotLedgerParameters, spotRead, spotValidation,
-  trustlineChange, verifySignedSpotEnvelope, verifySpotNetwork, type SpotAccount, type SpotAsset, type SpotPathRecord,
+  spotContractId, trustlineChange, verifySignedSpotEnvelope, verifySpotNetwork, type SpotAccount, type SpotAsset, type SpotPathRecord,
 } from "./spot-utils";
 
 export type SpotSwapReview = { quote: SpotCandidate; bps: number; fee: bigint };
@@ -27,10 +28,12 @@ function assertWallet(account: string, passphrase: string) {
   if (state.stellar?.activeNetwork !== passphrase || spotWalletNetwork() !== passphrase) throw new Error("Switch the wallet to Stellar Mainnet before approving this swap.");
 }
 function sdkAsset(asset: SpotAsset) {
+  if (asset.kind === "contract") throw new Error("Contract tokens require a Soroban route.");
   return asset.kind === "native" ? StellarSdk.Asset.native() : new StellarSdk.Asset(asset.code, asset.issuer!);
 }
 export function buildNativeSpotEnvelope(review: SpotSwapReview, account: SigningAccount, paths: SpotPathRecord[]) {
   const { quote, bps } = review;
+  if (quote.request.from.kind === "contract" || quote.request.to.kind === "contract") throw new Error("Contract tokens require a Soroban route.");
   const path = selectSpotPath(paths, quote);
   if (parseSpotAmount(path.destination_amount) < parseSpotAmount(quote.output)) throw new Error("The quote changed. Refresh and review the swap again.");
   const { from, to, amount } = quote.request;
@@ -83,9 +86,11 @@ export async function executeSpotSwap(review: SpotSwapReview, signTransaction: S
     ]);
     xdr = buildNativeSpotEnvelope(review, account, paths.response.records as SpotPathRecord[]);
   }
-  const [account, parameters] = await Promise.all([
+  const [account, parameters, contractBalance] = await Promise.all([
     spotRead<SigningAccount>(`/accounts/${address}`, undefined, quote.request.from.network), spotLedgerParameters(quote.request.from.network),
+    quote.request.from.kind === "contract" ? readSpotContractBalance(quote.request.from, address) : undefined,
   ]);
+  if (contractBalance !== undefined) account.contractBalances = { [spotContractId(quote.request.from)]: contractBalance };
   const error = quote.source === "soroban" ? sorobanSpotValidation(account, quote, parameters.reserve)
     : spotValidation(account, quote.request, parameters.reserve, quote.output);
   if (error) throw new Error(error);

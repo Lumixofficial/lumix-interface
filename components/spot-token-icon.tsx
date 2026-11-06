@@ -5,7 +5,7 @@ import { spotCurrencyImage, spotHomeDomain, spotRead, type SpotAsset } from "./s
 
 export function SpotTokenIcon({ asset }: { asset: SpotAsset }) {
   // Local artwork also renders in the static card, before the query provider mounts.
-  if (asset.icon || asset.kind === "native" || asset.unavailableReason) return <TokenImage key={asset.id} asset={asset} src={asset.icon} />;
+  if (asset.icon || asset.kind !== "classic" || asset.unavailableReason) return <TokenImage key={asset.id} asset={asset} src={asset.icon} />;
   return <IssuerTokenImage asset={asset} />;
 }
 function IssuerTokenImage({ asset }: { asset: SpotAsset }) {

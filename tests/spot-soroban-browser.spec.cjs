@@ -1,9 +1,10 @@
 require('@next/env').loadEnvConfig(process.cwd());
 const { test, expect } = require('@playwright/test');
-const { Address, Asset, Keypair, Networks, TransactionBuilder, nativeToScVal, scValToNative, xdr } = require('@stellar/stellar-sdk');
+const { Address, Asset, Keypair, Networks, StrKey, TransactionBuilder, nativeToScVal, scValToNative, xdr } = require('@stellar/stellar-sdk');
 const { installSpotTestWallet } = require('./helpers/spot-wallet.cjs');
 const { spotApiFixture, issuer, aggregator } = require('./helpers/spot-api-fixture.cjs');
 const { spotSacFixture } = require('./helpers/spot-sac-fixture.cjs');
+const indexedTokens = require('../components/spot-indexed-tokens.json').tokens;
 const entries = require('./fixtures/spot-aggregator-spec.json').entries;
 const horizon = 'https://horizon.stellar.org';
 const mainnetRpc = process.env.NEXT_PUBLIC_STELLAR_MAINNET_RPC_URL || 'https://mainnet.sorobanrpc.com';
@@ -12,8 +13,11 @@ const name = Buffer.from('contractspecv0');
 const section = Buffer.concat([leb(name.length), name, ...entries.map(value => Buffer.from(value, 'base64'))]);
 const wasm = Buffer.concat([Buffer.from([0, 97, 115, 109, 1, 0, 0, 0, 0]), leb(section.length), section]);
 
-async function setup(page, context, { apiEnabled = true, configError = false, nativeAlternatives = false, apiMinimum, apiOutput = '102', apiSplit = true, apiOutputs, shares, nativeOutput = '100', connect = true, loseSubmitResponse = true } = {}) {
+async function setup(page, context, { apiEnabled = true, configError = false, nativeAlternatives = false, apiMinimum, apiOutput = '102', apiSplit = true, apiOutputs, shares, nativeOutput = '100', connect = true, loseSubmitResponse = true,
+  contractTokens = {}, contractBalance = 5000000000n, contractOutput } = {}) {
   const attributionLogs = [];
+  const pageErrors = [], rpcRequests = [], pathRequests = [];
+  page.on('pageerror', error => pageErrors.push(error.message));
   page.on('console', message => {
     if (message.text().startsWith('[Swap Attribution]')) attributionLogs.push({ type: message.type(), text: message.text() });
   });
@@ -59,6 +63,7 @@ async function setup(page, context, { apiEnabled = true, configError = false, na
     if (url.pathname === '/ledgers') return route.fulfill({ json: { _embedded: { records: [{ base_reserve_in_stroops: 5000000, base_fee_in_stroops: 100, closed_at: new Date().toISOString() }] } } });
     if (url.pathname === '/assets') return route.fulfill({ json: { _embedded: { records: [{ asset_code: 'USDC', asset_issuer: issuer, flags: { auth_required: false } }] } } });
     if (url.pathname === '/paths/strict-send') {
+      pathRequests.push(url.href);
       const direct = { source_asset_type: 'native', source_amount: url.searchParams.get('source_amount'), destination_asset_type: 'credit_alphanum4', destination_asset_code: 'USDC', destination_asset_issuer: issuer, destination_amount: nativeOutput, path: [] };
       const indirect = { ...direct, destination_amount: '103', path: [{ asset_type: 'credit_alphanum4', asset_code: 'AQUA', asset_issuer: issuer }, { asset_type: 'credit_alphanum4', asset_code: 'EURC', asset_issuer: issuer }] };
       return route.fulfill({ json: { _embedded: { records: nativeAlternatives ? [direct, indirect] : [direct] } } });
@@ -75,13 +80,22 @@ async function setup(page, context, { apiEnabled = true, configError = false, na
   await page.route('**/api/spot/quotes', route => {
     if (route.request().method() === 'GET') return route.fulfill({ status: configError ? 503 : 200, json: { enabled: apiEnabled } });
     const body = route.request().postDataJSON(); requests.push(body);
-    const value = spotApiFixture(body.sender, { amount: body.amount, bps: body.options.slippageBps, output: apiOutput, split: apiSplit, shares });
+    const tokenAddress = value => value === 'native' ? Asset.native().contractId(Networks.PUBLIC)
+      : value.includes(':') ? new Asset(...value.split(':')).contractId(Networks.PUBLIC) : value;
+    const inputToken = tokenAddress(body.assetIn), outputToken = tokenAddress(body.assetOut);
+    const metadata = address => contractTokens[address] ?? indexedTokens.find(token => token.address === address);
+    const options = { amount: body.amount, bps: body.options.slippageBps,
+      output: contractOutput && body.assetOut.startsWith('C') && !body.assetOut.includes(':') ? contractOutput : apiOutput,
+      split: apiSplit, shares, inputToken, outputToken,
+      inputDecimals: metadata(inputToken)?.decimals ?? 7, outputDecimals: metadata(outputToken)?.decimals ?? 7,
+      inputSymbol: metadata(inputToken)?.symbol ?? 'XLM', outputSymbol: metadata(outputToken)?.symbol ?? 'USDC' };
+    const value = spotApiFixture(body.sender, options);
     value.meta.warnings = [
       'Search is bounded to configured bridges, hops, and candidate limits; the best result is among validated candidates.',
       'Concentrated quotes cover the current tick interval only; paths requiring unindexed tick crossings are excluded.',
     ];
     if (apiOutputs) value.data = apiOutputs.map((output, index) => {
-      const quote = spotApiFixture(body.sender, { amount: body.amount, bps: body.options.slippageBps, output, split: apiSplit, shares }).data[0];
+      const quote = spotApiFixture(body.sender, { ...options, output }).data[0];
       quote.id = `quote-${index}`;
       return quote;
     });
@@ -97,6 +111,7 @@ async function setup(page, context, { apiEnabled = true, configError = false, na
   const retval = nativeToScVal({ amount_in: 1000000000n, amount_out: 1020000000n, fee: 0n, surplus_out: 0n }).toXDR('base64');
   await page.route(mainnetRpc.replace(/\/$/, '') + '**', async route => {
     const request = route.request().postDataJSON(); let result;
+    rpcRequests.push(request);
     if (request.method === 'getLedgerEntries') {
       const records = request.params.keys.map(key => {
         const decoded = xdr.LedgerKey.fromXDR(key, 'base64'); let entry;
@@ -110,7 +125,12 @@ async function setup(page, context, { apiEnabled = true, configError = false, na
         return { key, xdr: entry.toXDR('base64'), lastModifiedLedgerSeq: 100, liveUntilLedgerSeq: 999999 };
       });
       result = { entries: records, latestLedger: 100 };
-    } else if (request.method === 'simulateTransaction') result = { latestLedger: 100, transactionData: data.toXDR('base64'), minResourceFee: '1000', events: [], results: [{ auth: [], xdr: retval }] };
+    } else if (request.method === 'simulateTransaction') {
+      const transaction = TransactionBuilder.fromXDR(request.params.transaction, Networks.PUBLIC);
+      const method = transaction.operations[0].func.invokeContract.functionName.toString();
+      result = { latestLedger: 100, transactionData: data.toXDR('base64'), minResourceFee: '1000', events: [],
+        results: [{ auth: [], xdr: method === 'balance' ? nativeToScVal(contractBalance, { type: 'i128' }).toXDR('base64') : retval }] };
+    }
     else if (request.method === 'sendTransaction') {
       submissions++;
       const tx = TransactionBuilder.fromXDR(request.params.transaction, Networks.PUBLIC);
@@ -133,7 +153,7 @@ async function setup(page, context, { apiEnabled = true, configError = false, na
   }
   await page.locator('#pay-amount').fill('100');
   await expect(page.getByRole('radio')).toHaveCount(Math.min(3, 1 + (apiEnabled && !configError ? apiOutputs?.length ?? 1 : 0)));
-  return { requests, reports, attributionLogs, address, account, get hash() { return hash; }, get accountReads() { return accountReads; }, get restoreReads() { return restoreReads; }, get submissions() { return submissions; }, get signedCall() { return signedCall; }, get nativeOperations() { return nativeOperations; }, setQuoteError: () => { quoteError = true; }, setRestoreError: () => { restoreError = true; },
+  return { requests, reports, attributionLogs, pageErrors, rpcRequests, pathRequests, address, account, get hash() { return hash; }, get accountReads() { return accountReads; }, get restoreReads() { return restoreReads; }, get submissions() { return submissions; }, get signedCall() { return signedCall; }, get nativeOperations() { return nativeOperations; }, setQuoteError: () => { quoteError = true; }, setRestoreError: () => { restoreError = true; },
     setReportError: () => { reportError = true; },
     pauseReport: () => { pausedReport = new Promise(resolve => { resumeReport = resolve; }); },
     resumeReport: () => { resumeReport?.(); pausedReport = undefined; },
@@ -357,14 +377,16 @@ for (const width of [1440, 390]) test(`seven-decimal quotes match Receive and ex
   await expect(page.getByLabel('Estimated receive amount')).toHaveText('1.6356619');
   await page.getByRole('button', { name: 'Transaction details', exact: true }).click();
   await expect(page.locator('#spot-transaction-details')).toContainText('Up to 1.00 XLM');
-  const layout = await page.evaluate(() => {
+  const measureLayout = () => page.evaluate(() => {
     const rows = document.querySelector('#spot-transaction-details .fee-detail-rows');
     const lastRow = rows.lastElementChild.getBoundingClientRect();
     const button = document.querySelector('.swap-primary-wrap button').getBoundingClientRect();
     return { padding: parseFloat(getComputedStyle(rows).paddingBottom), gap: button.top - lastRow.bottom, fits: document.documentElement.scrollWidth <= innerWidth };
   });
+  // Disclosure text stays mounted while the grid height animates open.
+  await expect.poll(async () => (await measureLayout()).gap).toBeGreaterThanOrEqual(20);
+  const layout = await measureLayout();
   expect(layout.padding).toBeGreaterThanOrEqual(20);
-  expect(layout.gap).toBeGreaterThanOrEqual(20);
   expect(layout.fits).toBe(true);
   await page.screenshot({ path: `.impeccable/review/spot-precision-details-${width}.png`, fullPage: true });
 });
@@ -541,6 +563,118 @@ test('successful swap refreshes the navbar immediately rather than waiting for p
   await page.getByRole('button', { name: 'Approve test wallet request', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Swap complete' })).toBeVisible();
   await expect(page.locator('.wallet-balance-control')).toHaveText('1,100.00 USDC', { timeout: 5000 });
+});
+
+const hahaAddress = 'CDME3GWAU7YSHVB6GWKDOQORR6TYKKQG6G7FDMMO7OPMQALBCNI5A2JR';
+for (const side of ['pay', 'receive']) test(`indexed HAHA searches and quotes by contract address in the ${side} picker without metadata RPC`, async ({ page, context }) => {
+  const state = await setup(page, context);
+  await page.getByRole('button', { name: new RegExp(`Choose ${side} asset:`) }).click();
+  const option = page.getByRole('option', { name: new RegExp(`HAHA, HahaToken, contract ${hahaAddress}`) });
+  for (const query of ['HAHA', 'haha', 'hAhAtOkEn', hahaAddress.slice(0, 26).toLowerCase(), hahaAddress.toLowerCase(), hahaAddress]) {
+    await page.getByRole('searchbox').fill(query);
+    await expect(option).toBeVisible();
+    await expect(page.locator('.asset-picker-empty').filter({ hasText: /Searching…|Looking up asset/ })).toHaveCount(0);
+    await expect(page.getByText('Contract lookup failed', { exact: true })).toHaveCount(0);
+    expect(state.rpcRequests).toHaveLength(0);
+  }
+  const nativeReads = state.pathRequests.length;
+  await option.click();
+  await expect(page.getByRole('button', { name: new RegExp(`Choose ${side} asset: HAHA`) })).toBeVisible();
+  if (side === 'pay') {
+    await expect(page.locator('.amount-card-balance').first()).toContainText('500.00 HAHA');
+    await page.getByRole('button', { name: 'MAX', exact: true }).click();
+    await expect(page.locator('#pay-amount')).toHaveValue('500');
+  }
+  await page.locator('#pay-amount').fill('10');
+  await expect.poll(() => state.requests.at(-1)).toMatchObject({ amount: '10', [side === 'pay' ? 'assetIn' : 'assetOut']: hahaAddress });
+  await expect(page.getByRole('radio')).toHaveCount(1);
+  await expect(page.locator('.spot-quote-output')).toContainText('102.0000000');
+  await expect(page.getByRole('button', { name: 'Review swap', exact: true })).toBeEnabled();
+  expect(state.pathRequests).toHaveLength(nativeReads);
+  expect(state.rpcRequests.every(request => request.method === 'simulateTransaction'
+    && TransactionBuilder.fromXDR(request.params.transaction, Networks.PUBLIC).operations[0].func.invokeContract.functionName.toString() === 'balance')).toBe(true);
+  expect(state.requests.every(request => !JSON.stringify(request).includes(':undefined'))).toBe(true);
+  expect(state.pageErrors).toEqual([]); expect(state.reports).toHaveLength(0);
+  if (side === 'receive') await page.screenshot({ path: '.impeccable/review/spot-sep41-desktop.png', fullPage: true });
+  await page.getByRole('button', { name: 'Review swap', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Confirm swap', exact: true })).toBeVisible();
+  await expect(page.locator(`.spot-review-issuer[title="${hahaAddress}"]`)).toBeVisible();
+});
+
+test('indexed HAHA remains searchable and selectable on mobile without a wallet or RPC', async ({ page, context }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const state = await setup(page, context, { connect: false });
+  await page.evaluate(() => document.documentElement.setAttribute('data-theme', 'light'));
+  await page.getByRole('button', { name: /Choose receive asset:/ }).click();
+  await page.getByRole('searchbox').fill('hahatoken');
+  const option = page.getByRole('option', { name: new RegExp(`HAHA.*${hahaAddress}`) });
+  await expect(option).toBeVisible();
+  await expect(page.locator('.asset-picker-empty').filter({ hasText: 'Searching…' })).toHaveCount(0);
+  await page.screenshot({ path: '.impeccable/review/spot-sep41-mobile-picker.png', fullPage: true });
+  await option.click();
+  await page.locator('#pay-amount').fill('10');
+  await expect.poll(() => state.requests.at(-1)).toMatchObject({ assetOut: hahaAddress, amount: '10' });
+  await expect(page.getByRole('radio')).toHaveCount(1);
+  await expect(page.getByLabel('Estimated receive amount')).toHaveText('102.0000000');
+  await expect(page.getByRole('button', { name: 'Connect wallet', exact: true }).last()).toBeEnabled();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  expect(state.rpcRequests).toHaveLength(0); expect(state.pageErrors).toEqual([]);
+});
+
+test('unindexed SEP-41 WASM token falls back to metadata simulation and keeps nine-decimal quotes', async ({ page, context }) => {
+  const address = StrKey.encodeContract(Buffer.alloc(32, 100));
+  const state = await setup(page, context, { contractTokens: { [address]: { symbol: 'NEW', decimals: 9 } }, contractOutput: '0.123456789' });
+  const fixture = spotSacFixture(Asset.native(), Networks.PUBLIC, { wasm: true, address });
+  const reads = [];
+  await page.route(mainnetRpc.replace(/\/$/, '') + '**', route => {
+    const request = route.request().postDataJSON();
+    if (request.method === 'getLedgerEntries') {
+      reads.push('SAC');
+      return route.fulfill({ json: { jsonrpc: '2.0', id: request.id, result: { entries: request.params.keys.map(key => ({ key, xdr: fixture.xdr })) } } });
+    }
+    if (request.method === 'simulateTransaction') {
+      const call = TransactionBuilder.fromXDR(request.params.transaction, Networks.PUBLIC).operations[0].func.invokeContract;
+      const method = call.functionName.toString();
+      if (['name', 'symbol', 'decimals'].includes(method)) {
+        reads.push(method);
+        const value = { name: 'New SEP-41 token', symbol: 'NEW', decimals: 9 }[method];
+        return route.fulfill({ json: { jsonrpc: '2.0', id: request.id, result: { results: [{ xdr: nativeToScVal(value, { type: method === 'decimals' ? 'u32' : 'string' }).toXDR('base64') }] } } });
+      }
+    }
+    return route.fallback();
+  });
+  await page.getByRole('button', { name: /Choose receive asset:/ }).click();
+  await page.getByRole('searchbox').fill(address);
+  const option = page.getByRole('option', { name: new RegExp(`NEW, New SEP-41 token, contract ${address}`) });
+  await expect(option).toBeVisible();
+  expect(reads[0]).toBe('SAC'); expect(reads.slice(1).sort()).toEqual(['decimals', 'name', 'symbol']);
+  await expect(page.getByText('Contract lookup failed', { exact: true })).toHaveCount(0);
+  await option.click();
+  await page.locator('#pay-amount').fill('10');
+  await expect.poll(() => state.requests.at(-1)).toMatchObject({ assetOut: address, amount: '10' });
+  await expect(page.getByLabel('Estimated receive amount')).toHaveText('0.123456789');
+  await expect(page.getByRole('button', { name: 'Review swap', exact: true })).toBeEnabled();
+  expect(state.pageErrors).toEqual([]); expect(state.submissions).toBe(0);
+});
+
+test('missing SEP-41 contract errors only after both lookups and clears when an indexed token matches', async ({ page, context }) => {
+  await setup(page, context);
+  const reads = [];
+  await page.route(mainnetRpc.replace(/\/$/, '') + '**', route => {
+    const request = route.request().postDataJSON();
+    const method = request.method === 'simulateTransaction'
+      ? TransactionBuilder.fromXDR(request.params.transaction, Networks.PUBLIC).operations[0].func.invokeContract.functionName.toString()
+      : request.method;
+    reads.push(method);
+    return route.fulfill({ json: { jsonrpc: '2.0', id: request.id, result: method === 'getLedgerEntries' ? { entries: [] } : { error: 'HostError: MissingValue' } } });
+  });
+  await page.getByRole('button', { name: /Choose receive asset:/ }).click();
+  await page.getByRole('searchbox').fill(StrKey.encodeContract(Buffer.alloc(32, 101)));
+  await expect(page.getByRole('alert').filter({ hasText: 'Contract lookup failed' })).toContainText('Stellar asset contract or SEP-41 token');
+  expect(reads[0]).toBe('getLedgerEntries'); expect(reads.slice(1).sort()).toEqual(['decimals', 'name', 'symbol']);
+  await page.getByRole('searchbox').fill('HAHA');
+  await expect(page.getByRole('option', { name: /HAHA, HahaToken/ })).toBeVisible();
+  await expect(page.getByText('Contract lookup failed', { exact: true })).toHaveCount(0);
 });
 
 for (const side of ['pay', 'receive']) test(`SAC address resolves in the ${side} picker without keeping stale results`, async ({ page, context }) => {

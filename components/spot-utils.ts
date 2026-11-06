@@ -1,4 +1,4 @@
-import { StrKey, extractBaseAddress, Transaction, TransactionBuilder } from "@stellar/stellar-sdk/base";
+import { Asset, StrKey, extractBaseAddress, Transaction, TransactionBuilder } from "@stellar/stellar-sdk/base";
 import { circleTestnetUsdc, circleTestnetEurc, mainnetOnly } from "./spot-verified-assets.json";
 import tokenImages from "./spot-token-images.json";
 import { SPOT_MAINNET_EURC_ISSUER, SPOT_MAINNET_USDC_ISSUER, SPOT_NETWORK_ID, spotNetwork, type SpotNetworkId } from "./spot-network";
@@ -6,6 +6,7 @@ import { SPOT_MAINNET_EURC_ISSUER, SPOT_MAINNET_USDC_ISSUER, SPOT_NETWORK_ID, sp
 export const SPOT_TESTNET = "Test SDF Network ; September 2015";
 export const SPOT_SCALE = BigInt("10000000");
 export const SPOT_MAX_AMOUNT = BigInt("9223372036854775807");
+export const SPOT_MAX_CONTRACT_AMOUNT = (BigInt(1) << BigInt(127)) - BigInt(1);
 // Native swap fee cap in stroops per operation.
 export const BLUX_SWAP_FEE_PER_OPERATION = BigInt("100000");
 export const SPOT_QUOTE_REFRESH_MS = 30_000;
@@ -32,8 +33,9 @@ export function spotCurrencyImage(metadata: unknown, asset: Pick<SpotAsset, "cod
 }
 
 export type SpotAsset = {
-  id: string; network: SpotNetworkId; kind: "native" | "classic";
+  id: string; network: SpotNetworkId; kind: "native" | "classic" | "contract";
   code: string; issuer?: string; name: string; icon?: string; curated?: boolean;
+  address?: string; symbol?: string; assetCode?: string | null; decimals?: number;
   authRequired?: boolean;
   unavailableReason?: string;
 };
@@ -44,6 +46,7 @@ export type SpotBalance = {
 export type SpotAccount = {
   account_id: string; balances: SpotBalance[]; subentry_count: number;
   num_sponsoring?: number; num_sponsored?: number;
+  contractBalances?: Record<string, bigint>;
 };
 export type SpotPathRecord = {
   source_asset_type: string; source_asset_code?: string; source_asset_issuer?: string; source_amount: string;
@@ -68,37 +71,76 @@ export function spotAsset(code: string, issuer?: string, network: SpotNetworkId 
     name: verified?.name ?? mainnet?.name ?? code, icon: spotLocalTokenImage(network, code, issuer) ?? verified?.image ?? mainnet?.image,
     curated: Boolean(verified), unavailableReason: mainnet?.reason };
 }
-export function bluxAsset(asset: SpotAsset) { return asset.kind === "native" ? "xlm" : `${asset.code}:${asset.issuer}`; }
+export function spotContractAsset(address: string, metadata: { symbol?: string | null; assetCode?: string | null; name?: string | null; decimals: number }, network: SpotNetworkId = SPOT_NETWORK_ID): SpotAsset {
+  if (!StrKey.isValidContract(address)) throw new Error("Enter a valid Stellar contract address.");
+  spotScale(metadata.decimals);
+  const symbol = metadata.symbol?.trim() || undefined;
+  const assetCode = metadata.assetCode?.trim() || null;
+  const code = symbol || assetCode || `${address.slice(0, 6)}…${address.slice(-6)}`;
+  return { id: `${network}:contract:${address}`, network, kind: "contract", address,
+    code, symbol, assetCode, name: metadata.name?.trim() || code, decimals: metadata.decimals };
+}
+export function spotAssetDecimals(asset: SpotAsset) {
+  if (asset.kind !== "contract") return 7;
+  if (asset.decimals === undefined) throw new Error("This contract token has no decimals metadata.");
+  spotScale(asset.decimals);
+  return asset.decimals;
+}
+export function spotContractId(asset: SpotAsset, passphrase: string = spotNetwork(asset.network).passphrase) {
+  if (asset.kind === "contract") {
+    if (!asset.address || !StrKey.isValidContract(asset.address)) throw new Error("This token has no valid contract address.");
+    return asset.address;
+  }
+  return (asset.kind === "native" ? Asset.native() : new Asset(asset.code, asset.issuer!)).contractId(passphrase);
+}
+export function spotAssetReference(asset: SpotAsset) {
+  return asset.kind === "native" ? "Native Stellar Lumens" : asset.kind === "contract" ? asset.address ?? "" : asset.issuer ?? "";
+}
+export function bluxAsset(asset: SpotAsset) {
+  if (asset.kind === "contract") throw new Error("Contract tokens require a Soroban route.");
+  return asset.kind === "native" ? "xlm" : `${asset.code}:${asset.issuer}`;
+}
 export function baseAccount(address: string) {
   if (!StrKey.isValidEd25519PublicKey(address) && !StrKey.isValidMed25519PublicKey(address)) throw new Error("The wallet did not provide a valid Stellar account.");
   return extractBaseAddress(address);
 }
-export function parseSpotAmount(value: string): bigint {
-  if (!/^(?:\d+(?:\.\d{0,7})?|\.\d{1,7})$/.test(value)) throw new Error("Enter an amount with up to 7 decimal places.");
+function spotScale(decimals: number) {
+  if (!Number.isInteger(decimals) || decimals < 0 || decimals > 38) throw new Error("Token decimals must be between 0 and 38.");
+  return BigInt(10) ** BigInt(decimals);
+}
+export function parseSpotAmount(value: string, decimals = 7, maximum = SPOT_MAX_AMOUNT): bigint {
+  const scale = spotScale(decimals);
+  const pattern = decimals ? new RegExp(`^(?:\\d+(?:\\.\\d{0,${decimals}})?|\\.\\d{1,${decimals}})$`) : /^\d+\.?$/;
+  if (typeof value !== "string" || value.length > 80 || !pattern.test(value)) throw new Error(`Enter an amount with up to ${decimals} decimal places.`);
   const [whole, fraction = ""] = value.split(".");
-  const units = BigInt(whole || "0") * SPOT_SCALE + BigInt(fraction.padEnd(7, "0"));
-  if (units > SPOT_MAX_AMOUNT) throw new Error("This amount exceeds Stellar’s maximum.");
+  const units = BigInt(whole || "0") * scale + BigInt(fraction.padEnd(decimals, "0") || "0");
+  if (units > maximum) throw new Error("This amount exceeds Stellar’s maximum.");
   return units;
 }
-export function spotDecimal(units: bigint) {
-  const negative = units < BigInt("0"); const absolute = negative ? -units : units;
-  const fraction = (absolute % SPOT_SCALE).toString().padStart(7, "0").replace(/0+$/, "");
-  return `${negative ? "-" : ""}${absolute / SPOT_SCALE}${fraction ? `.${fraction}` : ""}`;
+export function parseSpotAssetAmount(value: string, asset: SpotAsset) {
+  return parseSpotAmount(value, spotAssetDecimals(asset), asset.kind === "contract" ? SPOT_MAX_CONTRACT_AMOUNT : SPOT_MAX_AMOUNT);
 }
-export function formatSpotAmount(value: string | bigint) {
+export function spotDecimal(units: bigint, decimals = 7) {
+  const scale = spotScale(decimals);
+  const negative = units < BigInt("0"); const absolute = negative ? -units : units;
+  const fraction = (absolute % scale).toString().padStart(decimals, "0").replace(/0+$/, "");
+  return `${negative ? "-" : ""}${absolute / scale}${fraction ? `.${fraction}` : ""}`;
+}
+export function formatSpotAmount(value: string | bigint, decimals = 7) {
   try {
-    const units = typeof value === "bigint" ? value : parseSpotAmount(value);
+    const scale = spotScale(decimals);
+    const units = typeof value === "bigint" ? value : parseSpotAmount(value, decimals, SPOT_MAX_CONTRACT_AMOUNT);
     const absolute = units < BigInt("0") ? -units : units;
-    const cents = (absolute + BigInt("50000")) / BigInt("100000");
+    const cents = (absolute * BigInt(100) + scale / BigInt(2)) / scale;
     const whole = (cents / BigInt("100")).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
     return `${units < BigInt("0") ? "−" : ""}${whole}.${(cents % BigInt("100")).toString().padStart(2, "0")}`;
   } catch { return "—"; }
 }
 // Quote limits must stay visible down to one stroop and must never be rounded
 // up beyond the amount the transaction actually protects.
-export function formatSpotQuoteAmount(value: string | bigint, minimumFractionDigits: 2 | 7 = 2) {
+export function formatSpotQuoteAmount(value: string | bigint, minimumFractionDigits: 2 | 7 = 2, decimals = 7) {
   try {
-    const [whole, fraction = ""] = spotDecimal(typeof value === "bigint" ? value : parseSpotAmount(value)).split(".");
+    const [whole, fraction = ""] = spotDecimal(typeof value === "bigint" ? value : parseSpotAmount(value, decimals, SPOT_MAX_CONTRACT_AMOUNT), decimals).split(".");
     return `${whole.replace(/\B(?=(\d{3})+(?!\d))/g, ",")}.${fraction.padEnd(minimumFractionDigits, "0")}`;
   } catch { return "—"; }
 }
@@ -129,30 +171,34 @@ export function slippageFraction(bps: number) {
   // through binary rounding. Envelope minimums use integer basis points.
   return 1 - fraction < (10_000 - bps) / 10_000 ? fraction - Number.EPSILON : fraction;
 }
-export function minimumReceived(output: string, bps: number) {
+export function minimumReceived(output: string, bps: number, decimals = 7) {
   slippageFraction(bps);
-  const minimum = parseSpotAmount(output) * BigInt(10_000 - bps) / BigInt("10000");
-  return spotDecimal(minimum < BigInt("1") ? BigInt("1") : minimum);
+  const minimum = parseSpotAmount(output, decimals, SPOT_MAX_CONTRACT_AMOUNT) * BigInt(10_000 - bps) / BigInt("10000");
+  return spotDecimal(minimum < BigInt("1") ? BigInt("1") : minimum, decimals);
 }
-export function spotRate(output: string, input: string) {
-  const denominator = parseSpotAmount(input);
-  return denominator > BigInt("0") ? formatSpotAmount(parseSpotAmount(output) * SPOT_SCALE / denominator) : "—";
+export function spotRate(output: string, input: string, outputDecimals = 7, inputDecimals = 7) {
+  const denominator = parseSpotAmount(input, inputDecimals, SPOT_MAX_CONTRACT_AMOUNT) * spotScale(outputDecimals);
+  const numerator = parseSpotAmount(output, outputDecimals, SPOT_MAX_CONTRACT_AMOUNT) * spotScale(inputDecimals);
+  return denominator > BigInt("0") ? formatSpotAmount(numerator * SPOT_SCALE / denominator) : "—";
 }
 export function spotRequestKey(request: SpotRequest) {
-  return [spotNetwork(request.from.network).passphrase, request.account ?? "public", request.from.id, request.to.id, request.amount].join("|");
+  return [spotNetwork(request.from.network).passphrase, request.account ?? "public", request.from.id, request.to.id, request.amount,
+    ...(request.from.kind === "contract" || request.to.kind === "contract" ? [spotAssetDecimals(request.from), spotAssetDecimals(request.to)] : [])].join("|");
 }
 export function balanceLine(account: SpotAccount, asset: SpotAsset) {
+  if (asset.kind === "contract") return undefined;
   return account.balances.find(line => asset.kind === "native" ? line.asset_type === "native"
     : (line.asset_type === "credit_alphanum4" || line.asset_type === "credit_alphanum12") && line.asset_code === asset.code && line.asset_issuer === asset.issuer);
 }
 export function availableAsset(account: SpotAccount, asset: SpotAsset) {
+  if (asset.kind === "contract") return account.contractBalances?.[spotContractId(asset)] ?? BigInt(0);
   const line = balanceLine(account, asset);
   if (!line || line.is_authorized === false) return BigInt("0");
   const balance = parseSpotAmount(line.balance) - parseSpotAmount(line.selling_liabilities ?? "0");
   return balance > BigInt("0") ? balance : BigInt("0");
 }
 export function trustlineChange(account: SpotAccount, to: SpotAsset, output?: string) {
-  if (to.kind === "native") return { operations: 1, newEntries: 0 };
+  if (to.kind !== "classic") return { operations: 1, newEntries: 0 };
   const line = balanceLine(account, to);
   if (!line) return { operations: 2, newEntries: 1 };
   const capacity = parseSpotAmount(line.limit ?? "922337203685.4775807") - parseSpotAmount(line.balance) - parseSpotAmount(line.buying_liabilities ?? "0");
@@ -220,6 +266,7 @@ export function quoteFromPaths(records: SpotPathRecord[], request: SpotRequest):
 export function spotValidation(account: SpotAccount, request: SpotRequest, reserve: bigint, output?: string) {
   if (request.from.unavailableReason || request.to.unavailableReason) return request.from.unavailableReason ?? request.to.unavailableReason;
   if (request.from.id === request.to.id) return "Choose two different assets.";
+  if (request.from.kind === "contract" || request.to.kind === "contract") return "Contract tokens require a Soroban route.";
   const amount = parseSpotAmount(request.amount);
   if (amount === BigInt("0")) return "Enter an amount greater than zero.";
   const source = balanceLine(account, request.from); const destination = balanceLine(account, request.to);

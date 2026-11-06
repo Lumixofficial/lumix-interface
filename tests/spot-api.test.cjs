@@ -23,6 +23,44 @@ test('API request preserves exact asset identities, wallet, amount and user slip
   assert.equal(body.options.quoteLimit, 3);
   assert.notEqual(m.spotRequestKey(request), m.spotRequestKey({ ...request, from: m.spotAsset('XLM') }));
 });
+test('contract input/output quotes use C-addresses and exact per-token decimals, not CODE:undefined', () => {
+  const haha = m.spotContractAsset('CDME3GWAU7YSHVB6GWKDOQORR6TYKKQG6G7FDMMO7OPMQALBCNI5A2JR', { symbol: 'HAHA', name: 'HahaToken', decimals: 18 }, 'mainnet');
+  const nine = m.spotContractAsset(require('@stellar/stellar-sdk').StrKey.encodeContract(Buffer.alloc(32, 90)), { symbol: 'NINE', decimals: 9 }, 'mainnet');
+  for (const pair of [{ from: request.from, to: haha, amount: '10' }, { from: haha, to: request.to, amount: '10.000000000000000001' },
+    { from: haha, to: nine, amount: '10.000000000000000001' }]) {
+    const selected = { ...request, ...pair };
+    const body = api.spotApiBody(selected, 30);
+    for (const [field, asset] of [['assetIn', pair.from], ['assetOut', pair.to]]) {
+      assert.equal(body[field], asset.kind === 'contract' ? asset.address : asset.kind === 'native' ? 'native' : `${asset.code}:${asset.issuer}`);
+    }
+    assert.doesNotMatch(JSON.stringify(body), /undefined|null.*issuer/);
+    const value = spotApiFixture(address, { amount: pair.amount, output: '10.1234567', split: false,
+      inputToken: m.spotContractId(pair.from), outputToken: m.spotContractId(pair.to),
+      inputDecimals: m.spotAssetDecimals(pair.from), outputDecimals: m.spotAssetDecimals(pair.to) });
+    const checked = api.validateSpotApiResponse(value, selected, 30, Networks.PUBLIC);
+    const staleNative = { key: m.spotRequestKey(selected), request: selected, output: '999', route: [pair.from, pair.to] };
+    const [quote] = api.spotCandidates(staleNative, checked, selected);
+    assert.equal(quote.source, 'soroban'); assert.equal(quote.output, '10.1234567');
+    assert.equal(quote.soroban.txData.args[0].token_in, m.spotContractId(pair.from));
+    assert.equal(quote.soroban.txData.args[0].token_out, m.spotContractId(pair.to));
+    const wrongDecimals = structuredClone(value); wrongDecimals.meta.assetOut.decimals++;
+    assert.throws(() => api.validateSpotApiResponse(wrongDecimals, selected, 30, Networks.PUBLIC));
+    const wrongAddress = structuredClone(value); wrongAddress.data[0].txData.args[0].token_out = Asset.native().contractId(Networks.PUBLIC);
+    assert.throws(() => api.validateSpotApiResponse(wrongAddress, selected, 30, Networks.PUBLIC));
+  }
+});
+test('contract quotes travel through the same-origin quote API with the selected contract address', async t => {
+  const originalFetch = global.fetch; t.after(() => { global.fetch = originalFetch; });
+  const haha = require('../components/spot-tokens.ts').SPOT_INDEXED_ASSETS.find(asset => asset.code === 'HAHA');
+  const selected = { ...request, amount: '10', to: haha };
+  global.fetch = async (url, options) => {
+    assert.equal(url, '/api/spot/quotes'); assert.equal(options.method, 'POST');
+    const body = JSON.parse(options.body);
+    assert.equal(body.assetIn, 'native'); assert.equal(body.assetOut, haha.address);
+    return Response.json(spotApiFixture(address, { amount: '10', outputToken: haha.address }));
+  };
+  assert.equal((await api.fetchSpotApiQuotes(selected, 30, Networks.PUBLIC)).meta.assetOut.address, haha.address);
+});
 test('public previews load without a wallet and cannot be reused for a connected account', () => {
   const preview = { ...request, account: undefined };
   const body = api.spotApiBody(preview, 30);

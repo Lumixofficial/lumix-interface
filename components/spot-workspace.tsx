@@ -11,6 +11,7 @@ import { SpotAccordion, SpotQuoteOptions, SpotRouteDetails } from "./spot-quote-
 import { sorobanSpotValidation, SOROBAN_SPOT_FEE_CAP } from "./spot-soroban";
 import { executeSpotSwap, spotWalletNetwork, type SpotSwapReview } from "./spot-execution";
 import { recordSpotSwap, spotSwapRecordPayload, type RecordSwapPayload } from "./spot-swap-record";
+import { readSpotContractBalance } from "./spot-contract-token";
 import { Icon } from "./icon";
 import { SpotAssetSelector, spotIssuerLabel } from "./spot-asset-selector";
 import { SpotTokenIcon } from "./spot-token-icon";
@@ -21,8 +22,8 @@ import { useWallet } from "./wallet-provider";
 import {
   SPOT_CURATED_ASSETS, SPOT_QUOTE_REFRESH_MS, BLUX_SWAP_FEE_PER_OPERATION,
   availableAsset, baseAccount, formatSpotAmount, formatSpotQuoteAmount, formatSpotFee,
-  mergeSpotAssets, parseSlippage, parseSpotAmount, quotesFromPaths,
-  SpotHttpError, spotAsset, spotDecimal, spotError, spotLedgerParameters, spotRate, spotRead,
+  mergeSpotAssets, parseSlippage, parseSpotAssetAmount, quotesFromPaths,
+  SpotHttpError, spotAsset, spotAssetDecimals, spotAssetReference, spotContractId, spotDecimal, spotError, spotLedgerParameters, spotRate, spotRead,
   spotRequestKey, spotRequirements, spotTransactionUrl, spotValidation,
   walletRejected, type SpotAccount, type SpotAsset,
   type SpotQuote, type SpotReceipt, type SpotRequest,
@@ -47,7 +48,9 @@ async function readTransaction(hash: string): Promise<TransactionRecord | null> 
   }
 }
 const native = Asset.native();
-function sdkAsset(asset?: SpotAsset) { return !asset || asset.kind === "native" ? native : new Asset(asset.code, asset.issuer!); }
+// The disabled Horizon hook still constructs its inputs. Contract pairs use a
+// harmless placeholder, never a fabricated classic asset with no issuer.
+function sdkAsset(asset?: SpotAsset) { return asset?.kind === "classic" ? new Asset(asset.code, asset.issuer!) : native; }
 
 export function SpotWorkspace() {
   // Switch before paint so the ticket never renders against the app-wide
@@ -67,6 +70,7 @@ function SpotTrading() {
   const [pay, setPay] = useState(SPOT_CURATED_ASSETS[0]);
   const [receive, setReceive] = useState(SPOT_CURATED_ASSETS[1]);
   const [imported, setImported] = useState<SpotAsset[]>([]);
+  const nativePair = pay.kind !== "contract" && receive.kind !== "contract";
   const [amount, setAmount] = useState(""); const [slippageInput, setSlippageInput] = useState("0.3");
   const bps = parseSlippage(slippageInput);
   const [slippageOpen, setSlippageOpen] = useState(false); const [feesExpanded, setFeesExpanded] = useState(false);
@@ -97,9 +101,9 @@ function SpotTrading() {
   let address: string | undefined;
   try { address = connected ? baseAccount(blux.user!.address) : undefined; } catch { /* Invalid wallets cannot query or submit. */ }
   let units = BigInt("0"); let amountError = "";
-  try { if (amount && amount !== ".") units = parseSpotAmount(amount); } catch (error) { amountError = spotError(error); }
+  try { if (amount && amount !== ".") units = parseSpotAssetAmount(amount, pay); } catch (error) { amountError = spotError(error); }
   const currentRequest = useMemo<SpotRequest | null>(() => units > BigInt("0") && !amountError && !inputError && pay.id !== receive.id ? {
-    from: pay, to: receive, amount: spotDecimal(units), account: address,
+    from: pay, to: receive, amount: spotDecimal(units, spotAssetDecimals(pay)), account: address,
   } : null, [pay, receive, units, amountError, inputError, address]);
   const [debouncedAmount, setDebouncedAmount] = useState(amount);
   useEffect(() => {
@@ -132,11 +136,30 @@ function SpotTrading() {
     refetchOnWindowFocus: "always", refetchOnReconnect: "always", refetchInterval: address ? 10_000 : false,
     refetchIntervalInBackground: false,
   });
+  const payContractBalance = useQuery({
+    queryKey: ["lumix", "spot", "contract-balance", SPOT_NETWORK_ID, pay.kind === "contract" ? pay.address : null, address],
+    queryFn: ({ signal }) => readSpotContractBalance(pay, address!, signal),
+    enabled: canReadNetwork && Boolean(address) && pay.kind === "contract", staleTime: 10_000, retry: false,
+    refetchOnWindowFocus: "always", refetchOnReconnect: "always",
+    refetchInterval: address && pay.kind === "contract" ? 10_000 : false, refetchIntervalInBackground: false,
+  });
+  const receiveContractBalance = useQuery({
+    queryKey: ["lumix", "spot", "contract-balance", SPOT_NETWORK_ID, receive.kind === "contract" ? receive.address : null, address],
+    queryFn: ({ signal }) => readSpotContractBalance(receive, address!, signal),
+    enabled: canReadNetwork && Boolean(address) && receive.kind === "contract", staleTime: 10_000, retry: false,
+    refetchOnWindowFocus: "always", refetchOnReconnect: "always",
+    refetchInterval: address && receive.kind === "contract" ? 10_000 : false, refetchIntervalInBackground: false,
+  });
   // This same account response already contains every balance, including zero
   // trustlines. Avoid a second identical Horizon read through useBalances.
   const nativeBalanceReturned = Boolean(accountQuery.data?.balances.some(line => line.asset_type === "native"));
-  const account = useMemo<SpotAccount | undefined>(() => accountQuery.data && nativeBalanceReturned
-    ? accountQuery.data : undefined, [accountQuery.data, nativeBalanceReturned]);
+  const account = useMemo<SpotAccount | undefined>(() => {
+    if (!accountQuery.data || !nativeBalanceReturned) return undefined;
+    const contractBalances: Record<string, bigint> = {};
+    if (pay.kind === "contract" && payContractBalance.isSuccess) contractBalances[spotContractId(pay)] = payContractBalance.data;
+    if (receive.kind === "contract" && receiveContractBalance.isSuccess) contractBalances[spotContractId(receive)] = receiveContractBalance.data;
+    return { ...accountQuery.data, contractBalances };
+  }, [accountQuery.data, nativeBalanceReturned, pay, payContractBalance.isSuccess, payContractBalance.data, receive, receiveContractBalance.isSuccess, receiveContractBalance.data]);
   const held = useMemo(() => account?.balances.flatMap(line => {
     try {
       if (line.asset_type === "native") return [spotAsset("XLM", undefined, SPOT_NETWORK_ID)];
@@ -147,9 +170,9 @@ function SpotTrading() {
   const to = useMemo(() => sdkAsset(request?.to), [request?.to]);
   const candidates = useMemo(() => [to], [to]);
   let validRequest = false;
-  try { validRequest = Boolean(request && parseSpotAmount(request.amount) > BigInt("0") && request.from.id !== request.to.id); } catch { /* UI reports precision errors. */ }
+  try { validRequest = Boolean(request && parseSpotAssetAmount(request.amount, request.from) > BigInt("0") && request.from.id !== request.to.id); } catch { /* UI reports precision errors. */ }
   const paths = useStrictSendPaths([from, request?.amount ?? "1", candidates], { network: SPOT_NETWORK.passphrase }, {
-    enabled: canReadNetwork && validRequest && !busy && !uncertain, retry: false, staleTime: SPOT_QUOTE_REFRESH_MS,
+    enabled: canReadNetwork && validRequest && nativePair && !busy && !uncertain, retry: false, staleTime: SPOT_QUOTE_REFRESH_MS,
     refetchInterval: SPOT_QUOTE_REFRESH_MS, refetchIntervalInBackground: false,
     refetchOnWindowFocus: true, refetchOnReconnect: true,
   });
@@ -163,15 +186,15 @@ function SpotTrading() {
     // Other key changes already fetch automatically through React Query.
     if (previousAccount.current === address) return;
     previousAccount.current = address;
-    if (canReadNetwork && validRequest && !busy && !uncertain) void refetchPaths({ cancelRefetch: false });
-  }, [address, canReadNetwork, validRequest, busy, uncertain, refetchPaths]);
+    if (canReadNetwork && validRequest && nativePair && !busy && !uncertain) void refetchPaths({ cancelRefetch: false });
+  }, [address, canReadNetwork, validRequest, nativePair, busy, uncertain, refetchPaths]);
   const quoteResult = useMemo<{ quotes?: SpotQuote[]; error?: unknown }>(() => {
-    if (uncertain || !validNetwork || !validRequest || !request || !paths.data || paths.isError
+    if (uncertain || !nativePair || !validNetwork || !validRequest || !request || !paths.data || paths.isError
       || !currentRequest || spotRequestKey(currentRequest) !== spotRequestKey(request)) return {};
     const enriched = { ...request, to: { ...request.to, authRequired: metadata.data?.response.records[0]?.flags.auth_required } };
     try { return { quotes: quotesFromPaths(paths.data.response.records, enriched) }; }
     catch (error) { return { error }; }
-  }, [uncertain, currentRequest, validNetwork, validRequest, request, paths.data, paths.isError, metadata.data]);
+  }, [uncertain, nativePair, currentRequest, validNetwork, validRequest, request, paths.data, paths.isError, metadata.data]);
   const apiConfig = useQuery({
     queryKey: ["lumix", "spot", "api-config"], queryFn: ({ signal }) => fetchSpotApiEnabled(signal),
     retry: false, staleTime: SPOT_QUOTE_REFRESH_MS,
@@ -208,9 +231,10 @@ function SpotTrading() {
     : accountQuery.data === null ? "unfunded" : !account ? "loading" : "ready";
   const accountError = accountQuery.error ? spotError(accountQuery.error) : `Refresh your ${SPOT_NETWORK.name} balance and try again.`;
   const quoteStatus = !validNetwork || !currentRequest ? "idle" : quote ? "ready"
-    : !request || !paths.data && paths.isFetching || apiEnabled && apiQuotes.isFetching ? "loading"
-    : quotes.length ? "choose" : paths.isError || quoteResult.error ? "error" : "no-route";
-  const quoteError = paths.error || quoteResult.error ? spotError(paths.error ?? quoteResult.error) : "The native quote request failed. Change the amount or try again shortly.";
+    : !request || nativePair && !paths.data && paths.isFetching || apiConfig.isPending || apiEnabled && apiQuotes.isFetching ? "loading"
+    : quotes.length ? "choose" : nativePair && (paths.isError || quoteResult.error) || !nativePair && (apiConfig.isError || apiQuotes.isError) ? "error" : "no-route";
+  const quoteError = !nativePair ? spotError(apiConfig.error ?? apiQuotes.error)
+    : paths.error || quoteResult.error ? spotError(paths.error ?? quoteResult.error) : "The native quote request failed. Change the amount or try again shortly.";
   const quoteLoading = Boolean(currentRequest && !quote && (networkStatus === "checking" || (networkStatus === "ready" && ["idle", "loading"].includes(quoteStatus))));
   const quoteUpdating = Boolean(quote && (apiConfig.isPending || apiEnabled && apiQuotes.isFetching
     || (quote.source === "native" ? paths.isFetching || paths.isStale : apiQuotes.isStale)));
@@ -220,14 +244,19 @@ function SpotTrading() {
   const refetchNetwork = networkQuery.refetch;
   const refetchWalletNetwork = walletNetworkQuery.refetch;
   const refetchApiQuotes = apiQuotes.refetch;
+  const refetchPayContractBalance = payContractBalance.refetch;
+  const refetchReceiveContractBalance = receiveContractBalance.refetch;
   const refresh = async () => {
     // Balances must refresh even if the quote or wallet-network check fails.
-    const balances = address ? Promise.allSettled([refetchAccount(), refreshSharedBalances()]) : Promise.resolve([]);
+    const balances = address ? Promise.allSettled([refetchAccount(), refreshSharedBalances(),
+      ...(pay.kind === "contract" ? [refetchPayContractBalance()] : []),
+      ...(receive.kind === "contract" ? [refetchReceiveContractBalance()] : []),
+    ]) : Promise.resolve([]);
     const [parameters, currentNetwork] = await Promise.all([refetchNetwork(), address ? refetchWalletNetwork() : undefined]);
     await balances;
     if (!parameters.isSuccess || network !== SPOT_NETWORK.passphrase || (currentNetwork && (!currentNetwork.isSuccess || currentNetwork.data !== SPOT_NETWORK.passphrase))) return;
     await Promise.allSettled([
-      ...(validRequest ? [refetchPaths({ cancelRefetch: false })] : []),
+      ...(validRequest && nativePair ? [refetchPaths({ cancelRefetch: false })] : []),
       ...(apiEnabled && validRequest && bps ? [refetchApiQuotes({ cancelRefetch: false })] : []),
     ]);
   };
@@ -281,7 +310,7 @@ function SpotTrading() {
       const tx = await readTransaction(result.hash);
       if (!tx?.successful) throw new Error("Stellar has not returned a successful confirmation yet. Check status.");
       let received: string | undefined;
-      try { const value = await result.returnValue(); if (value?.amount_out !== undefined) received = spotDecimal(BigInt(value.amount_out)); } catch { /* Confirmation remains authoritative if decoding is unavailable. */ }
+      try { const value = await result.returnValue(); if (value?.amount_out !== undefined) received = spotDecimal(BigInt(value.amount_out), spotAssetDecimals(intent.asset)); } catch { /* Confirmation remains authoritative if decoding is unavailable. */ }
       queryClient.setQueryData(transactionKey(result.hash), { ...tx, received });
       await refresh();
     },
@@ -305,12 +334,14 @@ function SpotTrading() {
     }
   }
   const requirements = account && networkQuery.data !== undefined ? spotRequirements(account, pay, receive, networkQuery.data.reserve, quote?.output) : undefined;
-  const validation = account && currentRequest && networkQuery.data !== undefined ? quote?.source === "soroban"
-    ? sorobanSpotValidation(account, quote, networkQuery.data.reserve)
+  const usingSoroban = !nativePair || quote?.source === "soroban";
+  const validation = account && currentRequest && networkQuery.data !== undefined ? usingSoroban
+    ? sorobanSpotValidation(account, quote ?? { request: currentRequest, output: "0" }, networkQuery.data.reserve)
     : spotValidation(account, quote?.request ?? currentRequest, networkQuery.data.reserve, quote?.output) : undefined;
-  const maxNative = requirements && quote?.source === "soroban" && pay.kind === "native" ? requirements.max + requirements.fee - SOROBAN_SPOT_FEE_CAP : requirements?.max;
-  const balance = maxNative !== undefined ? (maxNative > BigInt(0) ? maxNative : BigInt(0)) : account ? availableAsset(account, pay) : undefined;
-  const receiveBalance = account ? availableAsset(account, receive) : undefined;
+  const maxNative = requirements && usingSoroban && pay.kind === "native" ? requirements.max + requirements.fee - SOROBAN_SPOT_FEE_CAP : requirements?.max;
+  const balance = pay.kind === "contract" && !payContractBalance.isSuccess ? undefined
+    : maxNative !== undefined ? (maxNative > BigInt(0) ? maxNative : BigInt(0)) : account ? availableAsset(account, pay) : undefined;
+  const receiveBalance = receive.kind === "contract" && !receiveContractBalance.isSuccess ? undefined : account ? availableAsset(account, receive) : undefined;
   const minimum = quote && bps ? spotCandidateMinimum(quote, bps) : undefined;
   const executionError = review?.quote.source === "soroban" ? contractMutation.error : swapMutation.error;
   const stage = dialog === "review" ? "review" : busy ? submitted ? "pending" : "wallet"
@@ -344,7 +375,7 @@ function SpotTrading() {
     if (review.quote.source === "soroban") contractMutation.mutate(review);
     else swapMutation.mutate(review);
   }
-  const assetDetailsReady = receive.kind === "native" || metadata.isSuccess;
+  const assetDetailsReady = receive.kind !== "classic" || metadata.isSuccess;
   const ready = Boolean(quote && quoteStatus === "ready" && !quoteUpdating && assetDetailsReady && !validation && !amountError && !inputError && bps && accountStatus === "ready" && networkStatus === "ready");
   let status: { title: string; body: string; warning?: boolean } | undefined;
   if (networkStatus === "wrong") status = { title: "Wrong wallet network", body: "Switch your wallet to Stellar Mainnet before swapping.", warning: true };
@@ -360,8 +391,8 @@ function SpotTrading() {
   else if (quoteStatus === "error") status = { title: "Quote unavailable", body: quoteError ?? "The native quote request failed. Try again." };
   const primaryLabel = uncertain ? "Check transaction status" : quoteStatus === "choose" ? "Choose a quote" : busy ? "Swap in progress…" : !units ? "Enter an amount" : validation ? "Check balance and reserves"
     : accountStatus === "unfunded" ? `Fund ${SPOT_NETWORK.name} account` : networkStatus === "wrong" ? `Switch wallet to ${SPOT_NETWORK.name}` : networkStatus === "error" ? `${SPOT_NETWORK.name} unavailable` : ["error", "no-route"].includes(quoteStatus) || ready ? "Review swap" : "Finding a route…";
-  const feeCap = quote?.source === "soroban" ? SOROBAN_SPOT_FEE_CAP : requirements?.fee ?? BLUX_SWAP_FEE_PER_OPERATION * BigInt(receive.kind === "native" ? 1 : 2);
-  const balanceLabel = (value?: bigint) => accountStatus === "loading" ? <SpotValueSkeleton>10,000.00</SpotValueSkeleton> : value === undefined ? "Unavailable" : formatSpotAmount(value);
+  const feeCap = usingSoroban ? SOROBAN_SPOT_FEE_CAP : requirements?.fee ?? BLUX_SWAP_FEE_PER_OPERATION * BigInt(receive.kind === "classic" ? 2 : 1);
+  const balanceLabel = (value: bigint | undefined, asset: SpotAsset, loading: boolean) => accountStatus === "loading" || loading ? <SpotValueSkeleton>10,000.00</SpotValueSkeleton> : value === undefined ? "Unavailable" : formatSpotAmount(value, spotAssetDecimals(asset));
   const explorer = submitted?.hash ? spotTransactionUrl(submitted.hash, SPOT_NETWORK_ID) : undefined;
   return <>
     <div className="spot-workspace"><section className="trade-panel swap-ticket" aria-labelledby="swap-title" data-details-expanded={feesExpanded}>
@@ -374,19 +405,19 @@ function SpotTrading() {
         </div>
       </div>
       <div className="asset-fields"><div className={`asset-amount-card${amountError || validation ? " is-error" : ""}`}>
-        <div className="amount-card-meta"><label className="amount-card-label" htmlFor="pay-amount">Pay</label>{wallet.isAuthenticated && <span className="amount-card-balance">Available <strong className="trade-number">{balanceLabel(balance)} {pay.code}</strong></span>}</div>
+        <div className="amount-card-meta"><label className="amount-card-label" htmlFor="pay-amount">Pay</label>{wallet.isAuthenticated && <span className="amount-card-balance">Available <strong className="trade-number">{balanceLabel(balance, pay, pay.kind === "contract" && payContractBalance.isPending && payContractBalance.isFetching)} {pay.code}</strong></span>}</div>
         <div className="amount-card-main"><span className="amount-input-viewport"><input id="pay-amount" className="amount-input" type="text" inputMode="decimal" autoComplete="off" maxLength={64} disabled={busy || uncertain} value={amount} style={{ width: `${Math.max(amount.length + 1, 5)}ch` }}
           onChange={event => changeAmount(event.target.value)} onBlur={() => { if (!amount) setInputError(""); else if (!amountError && units === BigInt("0")) setInputError("Enter an amount greater than zero."); }}
           onBeforeInput={event => { const text = (event.nativeEvent as InputEvent).data; if (!text) return; const field = event.currentTarget; const next = field.value.slice(0, field.selectionStart ?? 0) + text + field.value.slice(field.selectionEnd ?? field.value.length); if (!/^\d*\.?\d*$/.test(next)) event.preventDefault(); }}
           onPaste={event => { const field = event.currentTarget; const next = field.value.slice(0, field.selectionStart ?? 0) + event.clipboardData.getData("text") + field.value.slice(field.selectionEnd ?? field.value.length); if (!/^\d*\.?\d*$/.test(next)) event.preventDefault(); }}
           placeholder="0.00" aria-invalid={Boolean(amountError || validation || inputError)} aria-describedby={`pay-network-value${amountError || inputError ? " spot-amount-error" : ""}`} /></span>
           <SpotAssetSelector label="Choose pay asset" value={pay} assets={assets} canDiscover={validNetwork} disabled={busy || uncertain} onChange={asset => changeAsset("pay", asset)} />
-        </div><div className="amount-card-footer"><span id="pay-network-value" title={pay.issuer}>{spotIssuerLabel(pay)}</span><button className={`spot-max${wallet.isAuthenticated ? "" : " spot-control-hidden"}`} type="button" disabled={busy || uncertain || !requirements} onClick={() => { if (balance !== undefined) { setAmount(spotDecimal(balance)); setInputError(""); } }}>MAX</button></div>
+        </div><div className="amount-card-footer"><span id="pay-network-value" title={spotAssetReference(pay)}>{spotIssuerLabel(pay)}</span><button className={`spot-max${wallet.isAuthenticated ? "" : " spot-control-hidden"}`} type="button" disabled={busy || uncertain || !requirements || balance === undefined} onClick={() => { if (balance !== undefined) { setAmount(spotDecimal(balance, spotAssetDecimals(pay))); setInputError(""); } }}>MAX</button></div>
       </div>
         <button className="swap-direction-button" type="button" disabled={busy || uncertain} onClick={() => { setPay(receive); setReceive(pay); }} aria-label={`Reverse ${pay.code} and ${receive.code}`}><Icon name="arrow-down" size={18} /></button>
-        <div className="asset-amount-card receive-card"><div className="amount-card-meta"><span className="amount-card-label">Receive</span>{wallet.isAuthenticated && <span className="amount-card-balance">Wallet <strong className="trade-number">{balanceLabel(receiveBalance)} {receive.code}</strong></span>}</div>
-          <div className="amount-card-main"><output className={`amount-output${quote ? "" : " is-unavailable"}`} aria-label="Estimated receive amount" aria-busy={quoteLoading || quoteUpdating}>{quote ? formatSpotQuoteAmount(quote.output, 7) : quoteLoading ? <SpotValueSkeleton>0,000.0000000</SpotValueSkeleton> : "-"}</output><SpotAssetSelector label="Choose receive asset" value={receive} assets={assets} canDiscover={validNetwork} disabled={busy || uncertain} onChange={asset => changeAsset("receive", asset)} /></div>
-          <div className="amount-card-footer receive-supporting-copy"><span title={receive.issuer}>{spotIssuerLabel(receive)}</span><span>{quote ? `1 ${pay.code} = ${spotRate(quote.output, quote.request.amount)} ${receive.code}` : quoteLoading ? <SpotValueSkeleton>1 {pay.code} = 0.00 {receive.code}</SpotValueSkeleton> : "Rate unavailable"}</span></div>
+        <div className="asset-amount-card receive-card"><div className="amount-card-meta"><span className="amount-card-label">Receive</span>{wallet.isAuthenticated && <span className="amount-card-balance">Wallet <strong className="trade-number">{balanceLabel(receiveBalance, receive, receive.kind === "contract" && receiveContractBalance.isPending && receiveContractBalance.isFetching)} {receive.code}</strong></span>}</div>
+          <div className="amount-card-main"><output className={`amount-output${quote ? "" : " is-unavailable"}`} aria-label="Estimated receive amount" aria-busy={quoteLoading || quoteUpdating}>{quote ? formatSpotQuoteAmount(quote.output, 7, spotAssetDecimals(receive)) : quoteLoading ? <SpotValueSkeleton>0,000.0000000</SpotValueSkeleton> : "-"}</output><SpotAssetSelector label="Choose receive asset" value={receive} assets={assets} canDiscover={validNetwork} disabled={busy || uncertain} onChange={asset => changeAsset("receive", asset)} /></div>
+          <div className="amount-card-footer receive-supporting-copy"><span title={spotAssetReference(receive)}>{spotIssuerLabel(receive)}</span><span>{quote ? `1 ${pay.code} = ${spotRate(quote.output, quote.request.amount, spotAssetDecimals(receive), spotAssetDecimals(pay))} ${receive.code}` : quoteLoading ? <SpotValueSkeleton>1 {pay.code} = 0.00 {receive.code}</SpotValueSkeleton> : "Rate unavailable"}</span></div>
         </div>
       </div>
       {currentRequest && <SpotQuoteOptions quotes={quotes} selected={quote} disabled={busy || uncertain} loading={apiConfig.isPending || apiEnabled && apiQuotes.isFetching} apiEnabled={apiEnabled || apiConfig.isError}
@@ -407,9 +438,9 @@ function SpotTrading() {
       <div className="spot-transaction-info">
       <div className="fee-disclosure"><button className="fee-summary-toggle" type="button" aria-expanded={feesExpanded} aria-controls="spot-transaction-details" onClick={() => setFeesExpanded(value => !value)}><span>Transaction details</span><Icon name="chevron-down" size={17} className={feesExpanded ? "is-rotated" : ""} /></button>
         <SpotAccordion open={feesExpanded} id="spot-transaction-details"><dl className="trade-breakdown fee-detail-rows">
-          <div className="trade-breakdown-row"><dt>Minimum received</dt><dd>{minimum ? formatSpotQuoteAmount(minimum) + " " + receive.code : quoteLoading ? <SpotValueSkeleton>0,000.00 {receive.code}</SpotValueSkeleton> : "—"}</dd></div>
+          <div className="trade-breakdown-row"><dt>Minimum received</dt><dd>{minimum ? formatSpotQuoteAmount(minimum, 2, spotAssetDecimals(receive)) + " " + receive.code : quoteLoading ? <SpotValueSkeleton>0,000.00 {receive.code}</SpotValueSkeleton> : "—"}</dd></div>
           <div className="trade-breakdown-row"><dt>Slippage</dt><dd>{bps ? bps / 100 + "%" : "—"}</dd></div>
-          <div className="trade-breakdown-row"><dt>Quoted output</dt><dd>{quote ? formatSpotQuoteAmount(quote.output) + " " + receive.code : quoteLoading ? <SpotValueSkeleton>0,000.00 {receive.code}</SpotValueSkeleton> : "—"}</dd></div>
+          <div className="trade-breakdown-row"><dt>Quoted output</dt><dd>{quote ? formatSpotQuoteAmount(quote.output, 2, spotAssetDecimals(receive)) + " " + receive.code : quoteLoading ? <SpotValueSkeleton>0,000.00 {receive.code}</SpotValueSkeleton> : "—"}</dd></div>
           <div className="trade-breakdown-row"><dt>Network fee limit</dt><dd>{networkStatus === "checking" ? <SpotValueSkeleton>Up to 0.02 XLM</SpotValueSkeleton> : <>Up to {formatSpotFee(feeCap)} XLM</>}</dd></div>
         </dl></SpotAccordion>
       </div>
@@ -427,13 +458,13 @@ function SpotTrading() {
             {index === 1 && <span className="spot-review-direction" aria-hidden="true"><Icon name="arrow-down" size={18} /></span>}
             <div className="spot-review-leg">
               <span className="spot-review-label">{index === 0 ? "You pay" : "You receive"}</span>
-              <strong className="spot-review-amount trade-number">{index === 1 ? "≈ " : ""}{formatSpotQuoteAmount(index === 0 ? review.quote.request.amount : review.quote.output)}</strong>
+              <strong className="spot-review-amount trade-number">{index === 1 ? "≈ " : ""}{formatSpotQuoteAmount(index === 0 ? review.quote.request.amount : review.quote.output, 2, spotAssetDecimals(asset))}</strong>
               <div className="spot-review-token"><SpotTokenIcon asset={asset} /><div><strong>{asset.code}</strong><span>{asset.name}</span></div></div>
-              <span className="spot-review-issuer" title={asset.issuer}>{spotIssuerLabel(asset)}</span>
+              <span className="spot-review-issuer" title={spotAssetReference(asset)}>{spotIssuerLabel(asset)}</span>
             </div>
           </Fragment>)}
         </div>
-          <dl className="trade-breakdown review-breakdown"><div className="trade-breakdown-row"><dt>Route</dt><dd>{spotQuoteProtocols(review.quote)}</dd></div><div className="trade-breakdown-row"><dt>Minimum received</dt><dd>{formatSpotQuoteAmount(spotCandidateMinimum(review.quote, review.bps))} {review.quote.request.to.code}</dd></div><div className="trade-breakdown-row"><dt>Slippage</dt><dd>{review.bps / 100}%</dd></div><div className="trade-breakdown-row"><dt>Network fee limit</dt><dd>Up to {formatSpotFee(review.fee)} XLM</dd></div><div className="trade-breakdown-row trade-breakdown-row--total"><dt>Network</dt><dd>{SPOT_NETWORK.label}</dd></div></dl>
+          <dl className="trade-breakdown review-breakdown"><div className="trade-breakdown-row"><dt>Route</dt><dd>{spotQuoteProtocols(review.quote)}</dd></div><div className="trade-breakdown-row"><dt>Minimum received</dt><dd>{formatSpotQuoteAmount(spotCandidateMinimum(review.quote, review.bps), 2, spotAssetDecimals(review.quote.request.to))} {review.quote.request.to.code}</dd></div><div className="trade-breakdown-row"><dt>Slippage</dt><dd>{review.bps / 100}%</dd></div><div className="trade-breakdown-row"><dt>Network fee limit</dt><dd>Up to {formatSpotFee(review.fee)} XLM</dd></div><div className="trade-breakdown-row trade-breakdown-row--total"><dt>Network</dt><dd>{SPOT_NETWORK.label}</dd></div></dl>
           {review.quote.soroban && Date.parse(review.quote.soroban.expiresAt) <= (now) + 5000 && <p className="spot-quote-notice" role="status">This quote expired. Close and select a fresh quote.</p>}
           <div className="review-actions"><button className="trade-button trade-button--secondary" type="button" onClick={close}>Cancel</button><button className="trade-button trade-button--primary" type="button" disabled={busy || uncertain || !ready || Boolean(review.quote.soroban && Date.parse(review.quote.soroban.expiresAt) <= now + 5000)} onClick={execute}>Swap {review.quote.request.from.code} for {review.quote.request.to.code}<Icon name="chevron-right" size={16} /></button></div>
         </>}
@@ -443,7 +474,7 @@ function SpotTrading() {
         </div>}
         {stage === "confirmed" && receipt && <><div className="transaction-result is-success" role="status">
           <span><Icon name="check" size={25} /></span>
-          <div><strong className="trade-number">{receipt.received ? formatSpotAmount(receipt.received) : activity.isFetching ? <SpotValueSkeleton>0,000.00</SpotValueSkeleton> : "Confirmed"} {(submitted?.asset ?? receive).code}</strong><p>Swap confirmed on {SPOT_NETWORK.label}.</p></div>
+          <div><strong className="trade-number">{receipt.received ? formatSpotAmount(receipt.received, spotAssetDecimals(submitted?.asset ?? receive)) : activity.isFetching ? <SpotValueSkeleton>0,000.00</SpotValueSkeleton> : "Confirmed"} {(submitted?.asset ?? receive).code}</strong><p>Swap confirmed on {SPOT_NETWORK.label}.</p></div>
         </div><dl className="trade-breakdown result-breakdown"><div className="trade-breakdown-row"><dt>Network fee charged</dt><dd>{formatSpotFee(receipt.fee)} XLM</dd></div><div className="trade-breakdown-row"><dt>Ledger</dt><dd>{receipt.ledger.toLocaleString("en-US")}</dd></div><div className="trade-breakdown-row trade-breakdown-row--total"><dt>Transaction</dt><dd>{explorer && <a href={explorer} target="_blank" rel="noopener noreferrer">{receipt.hash.slice(0, 8)}…{receipt.hash.slice(-6)}</a>}</dd></div></dl><button className="trade-button trade-button--primary trade-button--block review-complete-action" type="button" onClick={close}>Done</button></>}
         {["failed", "cancelled", "unconfirmed"].includes(stage) && <><div className="transaction-result is-failure"><span><Icon name="x" size={25} /></span><div><strong>{stage === "unconfirmed" ? "Check confirmation before retrying" : stage === "cancelled" ? "Wallet approval cancelled" : "Swap failed"}</strong><p>{message}</p></div></div>{explorer && <a href={explorer} target="_blank" rel="noopener noreferrer">View {SPOT_NETWORK.name} transaction</a>}<div className="review-actions"><button className="trade-button trade-button--secondary" type="button" onClick={close}>Close</button><button className="trade-button trade-button--primary" type="button" onClick={() => uncertain ? void checkPending() : (close(), void refresh())}>{uncertain ? "Check status" : "Refresh and retry"}</button></div></>}
       </section>

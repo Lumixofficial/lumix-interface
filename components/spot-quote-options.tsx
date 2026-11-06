@@ -2,7 +2,7 @@
 
 import { type ReactNode } from "react";
 import { Icon } from "./icon";
-import { formatSpotQuoteAmount, type SpotAsset } from "./spot-utils";
+import { formatSpotQuoteAmount, spotAssetDecimals, type SpotAsset } from "./spot-utils";
 import { formatSpotShare, spotProtocol, spotQuoteProtocols, type SpotApiLeg, type SpotCandidate } from "./spot-api";
 import { SpotTokenIcon } from "./spot-token-icon";
 
@@ -45,7 +45,7 @@ export function SpotQuoteOptions({ quotes, selected, onSelect, disabled, loading
     <div role="radiogroup" aria-label="Swap quote" className="spot-quote-list">{quotes.map((quote, index) => {
       const checked = selected?.id === quote.id;
       const routeCount = quote.soroban?.legs.length ?? 1;
-      const output = formatSpotQuoteAmount(quote.output, 7);
+      const output = formatSpotQuoteAmount(quote.output, 7, spotAssetDecimals(quote.request.to));
       return <div className="spot-quote-option" data-selected={checked} key={quote.id}>
         <div className="spot-quote-head">
           <label className="spot-quote-choice">

@@ -1,14 +1,17 @@
 import { Address, Transaction, TransactionBuilder, scValToNative } from "@stellar/stellar-sdk/base";
-import { availableAsset, balanceLine, parseSpotAmount, spotAsset, spotEnvelopeHash, type SpotAccount } from "./spot-utils";
+import { availableAsset, balanceLine, parseSpotAmount, parseSpotAssetAmount, spotAsset, spotContractId, spotEnvelopeHash, type SpotAccount } from "./spot-utils";
 import { spotNetwork } from "./spot-network";
 import type { SpotCandidate } from "./spot-api";
 
 export const SOROBAN_SPOT_FEE_CAP = BigInt("10000000");
-export function sorobanSpotValidation(account: SpotAccount, quote: SpotCandidate, reserve: bigint) {
+export function sorobanSpotValidation(account: SpotAccount, quote: Pick<SpotCandidate, "request" | "output">, reserve: bigint) {
   const { from, to, amount } = quote.request;
+  if (from.unavailableReason || to.unavailableReason) return from.unavailableReason ?? to.unavailableReason;
+  if (spotContractId(from) === spotContractId(to)) return "Choose two different assets.";
   const source = balanceLine(account, from), destination = balanceLine(account, to);
-  if (!source || source.is_authorized === false || destination?.is_authorized === false) return "Check your token balance and issuer authorization.";
-  if (parseSpotAmount(amount) > availableAsset(account, from)) return "Insufficient available balance after open-offer liabilities.";
+  if (from.kind === "contract" && account.contractBalances?.[spotContractId(from)] === undefined) return "Contract token balance is unavailable. Refresh and try again.";
+  if (from.kind !== "contract" && (!source || source.is_authorized === false) || destination?.is_authorized === false) return "Check your token balance and issuer authorization.";
+  if (parseSpotAssetAmount(amount, from) > availableAsset(account, from)) return "Insufficient available balance after open-offer liabilities.";
   if (to.kind === "classic" && !destination) return `Add the ${to.code} trustline in your wallet before using a Soroban route.`;
   if (destination && to.kind === "classic" && parseSpotAmount(destination.balance) + parseSpotAmount(destination.buying_liabilities ?? "0") + parseSpotAmount(quote.output) > parseSpotAmount(destination.limit ?? "922337203685.4775807")) return "Increase the receiving trustline limit in your wallet before using this route.";
   const entries = Math.max(0, 2 + account.subentry_count + (account.num_sponsoring ?? 0) - (account.num_sponsored ?? 0));

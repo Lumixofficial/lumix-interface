@@ -1,5 +1,5 @@
-import { Asset, StrKey } from "@stellar/stellar-sdk/base";
-import { SPOT_QUOTE_REFRESH_MS, minimumReceived, parseSpotAmount, spotDecimal, spotRequestKey, spotRouteKey, type SpotQuote, type SpotRequest } from "./spot-utils";
+import { StrKey } from "@stellar/stellar-sdk/base";
+import { SPOT_QUOTE_REFRESH_MS, minimumReceived, parseSpotAssetAmount, spotAssetDecimals, spotContractId, spotDecimal, spotRequestKey, spotRouteKey, type SpotQuote, type SpotRequest } from "./spot-utils";
 
 export type SpotApiHop = {
   poolAddress: string; tokenIn: string; tokenOut: string; protocol: string; model: string;
@@ -31,7 +31,7 @@ export type SpotApiResponse = {
   };
 };
 export type SpotCandidate = SpotQuote & { id: string; source: "native" | "soroban"; soroban?: SpotApiQuote };
-export const spotCandidateMinimum = (quote: SpotCandidate, bps: number) => quote.soroban?.minimumReceived ?? minimumReceived(quote.output, bps);
+export const spotCandidateMinimum = (quote: SpotCandidate, bps: number) => quote.soroban?.minimumReceived ?? minimumReceived(quote.output, bps, spotAssetDecimals(quote.request.to));
 const protocols: Record<string, string> = { soroswap: "Soroswap", aquarius: "Aquarius", phoenix: "Phoenix", sushi: "Sushi", comet: "Comet" };
 // Quotes need a sender to encode txData. Public previews never have a wallet
 // account and cannot execute; connecting changes the query key and sender.
@@ -44,24 +44,27 @@ export const spotQuoteProtocols = (quote: SpotCandidate) => quote.source === "na
   : quote.soroban ? [...new Set(quote.soroban.legs.flatMap(leg => leg.hops.map(hop => spotProtocol(hop.protocol))))].join(" + ")
   : "Protocol unavailable";
 export function spotApiBody(request: SpotRequest, bps: number) {
+  const identity = (asset: SpotRequest["from"]) => asset.kind === "native" ? "native"
+    : asset.kind === "contract" ? spotContractId(asset) : `${asset.code}:${asset.issuer}`;
   return {
-    assetIn: request.from.kind === "native" ? "native" : `${request.from.code}:${request.from.issuer}`,
-    assetOut: request.to.kind === "native" ? "native" : `${request.to.code}:${request.to.issuer}`,
+    assetIn: identity(request.from), assetOut: identity(request.to),
     mode: "exact-in", amount: request.amount, sender: quoteSender(request),
     options: { slippageBps: bps, quoteLimit: 3, split: true, maxPoolAgeMs: 60_000 },
   };
 }
 export function validateSpotApiResponse(value: SpotApiResponse, request: SpotRequest, bps: number, passphrase: string, now = Date.now()) {
   const fail = () => { throw new Error("The Soroban quote does not match this swap. Refresh quotes."); };
-  const token = (asset: SpotRequest["from"]) => (asset.kind === "native" ? Asset.native() : new Asset(asset.code, asset.issuer!)).contractId(passphrase);
+  const token = (asset: SpotRequest["from"]) => spotContractId(asset, passphrase);
+  const inputAmount = (amount: string) => parseSpotAssetAmount(amount, request.from);
+  const outputAmount = (amount: string) => parseSpotAssetAmount(amount, request.to);
   const input = token(request.from), output = token(request.to);
   const expectedNetwork = request.from.network === "mainnet" ? "pubnet" : "testnet";
   if (!value?.meta || !Array.isArray(value.data) || value.data.length > 50 || value.meta.network !== expectedNetwork) {
     throw new Error("Soroban quotes are for a different Stellar network. Switch networks or refresh quotes.");
   }
-  if (value.meta.mode !== "exact-in" || parseSpotAmount(value.meta.amount) !== parseSpotAmount(request.amount)
+  if (value.meta.mode !== "exact-in" || inputAmount(value.meta.amount) !== inputAmount(request.amount)
     || value.meta.slippageBps !== bps || value.meta.assetIn?.address !== input || value.meta.assetOut?.address !== output
-    || value.meta.assetIn.decimals !== 7 || value.meta.assetOut.decimals !== 7 || !Array.isArray(value.meta.warnings)) fail();
+    || value.meta.assetIn.decimals !== spotAssetDecimals(request.from) || value.meta.assetOut.decimals !== spotAssetDecimals(request.to) || !Array.isArray(value.meta.warnings)) fail();
   const ids = new Set<string>();
   for (const quote of value.data) {
     const call = quote.txData, args = call?.args?.[0];
@@ -70,9 +73,9 @@ export function validateSpotApiResponse(value: SpotApiResponse, request: SpotReq
       || args.sender !== quoteSender(request) || (args.recipient !== null && args.recipient !== quoteSender(request))
       || args.token_in !== input || args.token_out !== output || args.amount !== quote.amountInRaw
       || args.limit !== quote.minimumReceivedRaw || args.fee_bps !== quote.feeBps
-      || parseSpotAmount(quote.amountIn) !== parseSpotAmount(request.amount) || parseSpotAmount(quote.amountIn) !== BigInt(quote.amountInRaw)
-      || parseSpotAmount(quote.amountOut) !== BigInt(quote.amountOutRaw) || BigInt(quote.amountOutRaw) <= BigInt(0)
-      || parseSpotAmount(quote.minimumReceived) !== BigInt(quote.minimumReceivedRaw) || BigInt(quote.minimumReceivedRaw) <= BigInt(0)
+      || inputAmount(quote.amountIn) !== inputAmount(request.amount) || inputAmount(quote.amountIn) !== BigInt(quote.amountInRaw)
+      || outputAmount(quote.amountOut) !== BigInt(quote.amountOutRaw) || BigInt(quote.amountOutRaw) <= BigInt(0)
+      || outputAmount(quote.minimumReceived) !== BigInt(quote.minimumReceivedRaw) || BigInt(quote.minimumReceivedRaw) <= BigInt(0)
       || BigInt(quote.minimumReceivedRaw) > BigInt(quote.amountOutRaw)
       || !Number.isFinite(Date.parse(quote.expiresAt)) || !/^\d+$/.test(args.deadline)
       || BigInt(args.deadline) !== BigInt(Math.floor(Date.parse(quote.expiresAt) / 1000))
@@ -122,18 +125,19 @@ export async function fetchSpotApiQuotes(request: SpotRequest, bps: number, pass
 }
 export function spotCandidates(native: SpotQuote | SpotQuote[] | undefined, api: SpotApiResponse | undefined, request: SpotRequest, bps = 30, now = Date.now()): SpotCandidate[] {
   const key = spotRequestKey(request);
-  const bestNative = (Array.isArray(native) ? native : native ? [native] : []).filter(quote => quote.key === key)
-    .reduce<SpotQuote | undefined>((best, quote) => !best || parseSpotAmount(quote.output) > parseSpotAmount(best.output) ? quote : best, undefined);
+  const outputAmount = (amount: string) => parseSpotAssetAmount(amount, request.to);
+  const bestNative = (request.from.kind === "contract" || request.to.kind === "contract" ? [] : Array.isArray(native) ? native : native ? [native] : []).filter(quote => quote.key === key)
+    .reduce<SpotQuote | undefined>((best, quote) => !best || outputAmount(quote.output) > outputAmount(best.output) ? quote : best, undefined);
   // Horizon paths share the same native operation and do not identify a
   // Soroban protocol. Contribute only their best quote to venue comparison.
   const quotes: SpotCandidate[] = bestNative ? [{ ...bestNative, source: "native", id: `native:${spotRouteKey(bestNative)}` }] : [];
   for (const quote of api?.data ?? []) {
     if (Date.parse(quote.expiresAt) <= now + 5000 || quote.txData.args[0].sender !== quoteSender(request)) continue;
-    quotes.push({ key, request, output: spotDecimal(BigInt(quote.amountOutRaw)), route: [request.from, request.to], source: "soroban", id: `soroban:${quote.id}`, soroban: quote });
+    quotes.push({ key, request, output: spotDecimal(BigInt(quote.amountOutRaw), spotAssetDecimals(request.to)), route: [request.from, request.to], source: "soroban", id: `soroban:${quote.id}`, soroban: quote });
   }
   return quotes.sort((a, b) => {
-    const delta = parseSpotAmount(b.output) - parseSpotAmount(a.output)
-      || parseSpotAmount(spotCandidateMinimum(b, bps)) - parseSpotAmount(spotCandidateMinimum(a, bps));
+    const delta = outputAmount(b.output) - outputAmount(a.output)
+      || outputAmount(spotCandidateMinimum(b, bps)) - outputAmount(spotCandidateMinimum(a, bps));
     return delta > BigInt(0) ? 1 : delta < BigInt(0) ? -1 : 0;
   }).slice(0, 3);
 }

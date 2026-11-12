@@ -362,7 +362,7 @@ test('quotes refresh quietly every 30 seconds, deduplicate in-flight refreshes, 
   await expect.poll(() => calls).toBe(firstCalls + 1);
   await expect(page.getByLabel('Estimated receive amount')).toHaveText('935.86');
   await expect(page.locator('.spot-quote-region')).toHaveAttribute('aria-busy', 'true');
-  await expect(page.locator('.compact-route-copy')).toContainText('Updating quote · Previous estimate');
+  await expect(page.locator('.compact-route-copy')).toHaveText(/^Selected execution path/);
   await page.clock.fastForward(31000);
   expect(calls).toBe(firstCalls + 1);
   release();

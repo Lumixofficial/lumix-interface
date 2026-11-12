@@ -43,7 +43,7 @@ function DiscordMark() {
 const socialLinks = [
   { label: "GitHub", icon: <GitHubMark />, href: "https://github.com/Lumixofficial", external: true },
   { label: "X", icon: <XMark />, href: "#", external: false },
-  { label: "Discord", icon: <DiscordMark />, href: "#", external: false },
+  { label: "Discord", icon: <DiscordMark />, href: "https://discord.gg/P4DStQtmP7", external: true },
 ] as const;
 
 const footerLinks: { label: string; href: string; external?: boolean }[] = [

@@ -36,12 +36,13 @@ export function SpotRouteDetails({ quote }: { quote: SpotCandidate }) {
   </ul>;
 }
 
-export function SpotQuoteOptions({ quotes, selected, onSelect, disabled, loading, error, onRetry, apiEnabled }: {
+export function SpotQuoteOptions({ quotes, selected, onSelect, disabled, loading, resolving, error, onRetry, apiEnabled }: {
   quotes: SpotCandidate[]; selected?: SpotCandidate; onSelect: (id: string) => void;
-  disabled: boolean; loading: boolean; error?: string; onRetry: () => void; apiEnabled: boolean;
+  disabled: boolean; loading: boolean; resolving: boolean; error?: string; onRetry: () => void; apiEnabled: boolean;
 }) {
-  return <section className="spot-quotes" aria-labelledby="spot-quotes-title">
-    <div className="spot-quotes-head"><h3 id="spot-quotes-title">{apiEnabled || quotes.length > 1 ? "Compare quotes" : "Swap quote"}</h3><span>{loading ? "Finding routes…" : `${quotes.length} ${quotes.length === 1 ? "quote" : "quotes"}`}</span></div>
+  return <section className="spot-quotes" aria-labelledby="spot-quotes-title" aria-busy={resolving}>
+    <div className="spot-quotes-head"><h3 id="spot-quotes-title">{apiEnabled || quotes.length > 1 ? "Compare quotes" : "Swap quote"}</h3>{!resolving && <span>{`${quotes.length} ${quotes.length === 1 ? "quote" : "quotes"}`}</span>}</div>
+    {resolving ? <div className="spot-quote-loading" role="status"><span className="spot-quote-spinner" aria-hidden="true" /><span>Finding routes…</span></div> : <>
     <div role="radiogroup" aria-label="Swap quote" className="spot-quote-list">{quotes.map((quote, index) => {
       const checked = selected?.id === quote.id;
       const routeCount = quote.soroban?.legs.length ?? 1;
@@ -58,7 +59,8 @@ export function SpotQuoteOptions({ quotes, selected, onSelect, disabled, loading
       </div>;
     })}</div>
     {!apiEnabled ? null : error ? <div className="spot-quote-notice" role="status"><span>Soroban quotes unavailable: {error}</span><button className="spot-inline-action" type="button" disabled={disabled || loading} onClick={onRetry}>Retry Soroban quotes</button></div>
-      : !loading && !quotes.some(quote => quote.source === "soroban") ? <p className="spot-quote-notice">No Soroban route for this amount. Try another amount or pair.</p>
+      : !quotes.some(quote => quote.source === "soroban") ? <p className="spot-quote-notice">No Soroban route for this amount. Try another amount or pair.</p>
       : null}
+    </>}
   </section>;
 }

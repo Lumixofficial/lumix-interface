@@ -123,6 +123,14 @@ export async function fetchSpotApiQuotes(request: SpotRequest, bps: number, pass
   if (!response.ok) throw new Error(value.error?.message ?? "Soroban quotes are unavailable. Retry shortly.");
   return validateSpotApiResponse(value, request, bps, passphrase);
 }
+type SpotQuoteSource = { isFetching: boolean; isFetchedAfterMount: boolean };
+// A new request waits for every enabled source's first response, so a fast
+// native path never flashes ahead of the aggregator. Interval and focus
+// refreshes keep the resolved comparison on screen.
+export function spotQuotesResolving({ debouncing, native, configPending, api }: { debouncing: boolean; native?: SpotQuoteSource; configPending: boolean; api?: SpotQuoteSource }) {
+  const awaitingFirst = (source?: SpotQuoteSource) => Boolean(source?.isFetching && !source.isFetchedAfterMount);
+  return debouncing || configPending || awaitingFirst(native) || awaitingFirst(api);
+}
 export function spotCandidates(native: SpotQuote | SpotQuote[] | undefined, api: SpotApiResponse | undefined, request: SpotRequest, bps = 30, now = Date.now()): SpotCandidate[] {
   const key = spotRequestKey(request);
   const outputAmount = (amount: string) => parseSpotAssetAmount(amount, request.to);

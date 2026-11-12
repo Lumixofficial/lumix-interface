@@ -6,7 +6,7 @@ import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, use
 import { createPortal } from "react-dom";
 import { SPOT_NETWORK, SPOT_NETWORK_ID } from "./spot-network";
 import { LUMIX_STELLAR_NETWORK } from "./stellar-network";
-import { fetchSpotApiEnabled, fetchSpotApiQuotes, spotApiRefreshMs, spotCandidateMinimum, spotCandidates, spotQuoteProtocols } from "./spot-api";
+import { fetchSpotApiEnabled, fetchSpotApiQuotes, spotApiRefreshMs, spotCandidateMinimum, spotCandidates, spotQuoteProtocols, spotQuotesResolving } from "./spot-api";
 import { SpotAccordion, SpotQuoteOptions, SpotRouteDetails } from "./spot-quote-options";
 import { sorobanSpotValidation, SOROBAN_SPOT_FEE_CAP } from "./spot-soroban";
 import { executeSpotSwap, spotWalletNetwork, type SpotExecutionProgress, type SpotSwapReview } from "./spot-execution";
@@ -221,6 +221,11 @@ function SpotTrading() {
     ? spotCandidates(quoteResult.quotes, apiEnabled && !apiQuotes.isError ? apiQuotes.data : undefined,
       { ...currentRequest, to: { ...currentRequest.to, authRequired: metadata.data?.response.records[0]?.flags.auth_required } }, bps ?? 30, now) : [];
   const quote = selection?.key === selectionKey ? quotes.find(item => item.id === selection.id) : quotes[0];
+  const routesResolving = Boolean(validNetwork && currentRequest) && spotQuotesResolving({
+    debouncing: !request, native: nativePair ? paths : undefined, configPending: apiConfig.isPending, api: apiEnabled ? apiQuotes : undefined,
+  });
+  const shownQuotes = routesResolving ? [] : quotes;
+  const shownQuote = routesResolving ? undefined : quote;
   // Spot moves Blux to Mainnet itself, so a different app network is a switch
   // in progress. A different wallet session network is "wrong".
   const networkSettled = hydrated && blux.isReady && network === SPOT_NETWORK.passphrase;
@@ -232,12 +237,12 @@ function SpotTrading() {
     || (accountQuery.data && !nativeBalanceReturned) ? "error"
     : accountQuery.data === null ? "unfunded" : !account ? "loading" : "ready";
   const accountError = accountQuery.error ? spotError(accountQuery.error) : `Refresh your ${SPOT_NETWORK.name} balance and try again.`;
-  const quoteStatus = !validNetwork || !currentRequest ? "idle" : quote ? "ready"
+  const quoteStatus = !validNetwork || !currentRequest ? "idle" : routesResolving ? "loading" : quote ? "ready"
     : !request || nativePair && !paths.data && paths.isFetching || apiConfig.isPending || apiEnabled && apiQuotes.isFetching ? "loading"
     : quotes.length ? "choose" : nativePair && (paths.isError || quoteResult.error) || !nativePair && (apiConfig.isError || apiQuotes.isError) ? "error" : "no-route";
   const quoteError = !nativePair ? spotError(apiConfig.error ?? apiQuotes.error)
     : paths.error || quoteResult.error ? spotError(paths.error ?? quoteResult.error) : "The native quote request failed. Change the amount or try again shortly.";
-  const quoteLoading = Boolean(currentRequest && !quote && (networkStatus === "checking" || (networkStatus === "ready" && ["idle", "loading"].includes(quoteStatus))));
+  const quoteLoading = Boolean(currentRequest && !shownQuote && (networkStatus === "checking" || (networkStatus === "ready" && ["idle", "loading"].includes(quoteStatus))));
   const quoteUpdating = Boolean(quote && (apiConfig.isPending || apiEnabled && apiQuotes.isFetching
     || (quote.source === "native" ? paths.isFetching || paths.isStale : apiQuotes.isStale)));
   const assets = useMemo(() => mergeSpotAssets(SPOT_CURATED_ASSETS, held, imported), [held, imported]);
@@ -354,7 +359,7 @@ function SpotTrading() {
   const balance = pay.kind === "contract" && !payContractBalance.isSuccess ? undefined
     : maxNative !== undefined ? (maxNative > BigInt(0) ? maxNative : BigInt(0)) : account ? availableAsset(account, pay) : undefined;
   const receiveBalance = receive.kind === "contract" && !receiveContractBalance.isSuccess ? undefined : account ? availableAsset(account, receive) : undefined;
-  const minimum = quote && bps ? spotCandidateMinimum(quote, bps) : undefined;
+  const minimum = shownQuote && bps ? spotCandidateMinimum(shownQuote, bps) : undefined;
   const executionError = review?.quote.source === "soroban" ? contractMutation.error : swapMutation.error;
   const stage = dialog === "review" ? "review" : busy ? submitted ? "pending" : "wallet"
     : receipt ? "confirmed" : uncertain ? "unconfirmed" : walletRejected(executionError) ? "cancelled" : "failed";
@@ -434,31 +439,32 @@ function SpotTrading() {
       </div>
         <button className="swap-direction-button" type="button" disabled={busy || uncertain} onClick={() => { setPay(receive); setReceive(pay); }} aria-label={`Reverse ${pay.code} and ${receive.code}`}><Icon name="arrow-down" size={18} /></button>
         <div className="asset-amount-card receive-card"><div className="amount-card-meta"><span className="amount-card-label">Receive</span>{wallet.isAuthenticated && <span className="amount-card-balance">Wallet <strong className="trade-number">{balanceLabel(receiveBalance, receive, receive.kind === "contract" && receiveContractBalance.isPending && receiveContractBalance.isFetching)} {receive.code}</strong></span>}</div>
-          <div className="amount-card-main"><output className={`amount-output${quote ? "" : " is-unavailable"}`} aria-label="Estimated receive amount" aria-busy={quoteLoading || quoteUpdating}>{quote ? formatSpotQuoteAmount(quote.output, 7, spotAssetDecimals(receive)) : quoteLoading ? <SpotValueSkeleton>0,000.0000000</SpotValueSkeleton> : "-"}</output><SpotAssetSelector label="Choose receive asset" value={receive} assets={assets} canDiscover={validNetwork} disabled={busy || uncertain} onChange={asset => changeAsset("receive", asset)} /></div>
-          <div className="amount-card-footer receive-supporting-copy"><span title={spotAssetReference(receive)}>{spotIssuerLabel(receive)}</span><span>{quote ? `1 ${pay.code} = ${spotRate(quote.output, quote.request.amount, spotAssetDecimals(receive), spotAssetDecimals(pay))} ${receive.code}` : quoteLoading ? <SpotValueSkeleton>1 {pay.code} = 0.00 {receive.code}</SpotValueSkeleton> : "Rate unavailable"}</span></div>
+          <div className="amount-card-main"><output className={`amount-output${shownQuote ? "" : " is-unavailable"}`} aria-label="Estimated receive amount" aria-busy={quoteLoading || quoteUpdating}>{shownQuote ? formatSpotQuoteAmount(shownQuote.output, 7, spotAssetDecimals(receive)) : quoteLoading ? <SpotValueSkeleton>0,000.0000000</SpotValueSkeleton> : "-"}</output><SpotAssetSelector label="Choose receive asset" value={receive} assets={assets} canDiscover={validNetwork} disabled={busy || uncertain} onChange={asset => changeAsset("receive", asset)} /></div>
+          <div className="amount-card-footer receive-supporting-copy"><span title={spotAssetReference(receive)}>{spotIssuerLabel(receive)}</span><span>{shownQuote ? `1 ${pay.code} = ${spotRate(shownQuote.output, shownQuote.request.amount, spotAssetDecimals(receive), spotAssetDecimals(pay))} ${receive.code}` : quoteLoading ? <SpotValueSkeleton>1 {pay.code} = 0.00 {receive.code}</SpotValueSkeleton> : "Rate unavailable"}</span></div>
         </div>
       </div>
-      {currentRequest && <SpotQuoteOptions quotes={quotes} selected={quote} disabled={busy || uncertain} loading={apiConfig.isPending || apiEnabled && apiQuotes.isFetching} apiEnabled={apiEnabled || apiConfig.isError}
+      {currentRequest && <SpotQuoteOptions quotes={shownQuotes} selected={shownQuote} resolving={quoteLoading} disabled={busy || uncertain} loading={apiConfig.isPending || apiEnabled && apiQuotes.isFetching} apiEnabled={apiEnabled || apiConfig.isError}
         error={apiConfig.isError ? spotError(apiConfig.error) : apiEnabled && apiQuotes.isError ? spotError(apiQuotes.error) : undefined}
         onSelect={id => { setSelection({ key: selectionKey, id }); setRouteExpanded(false); }} onRetry={() => { if (apiConfig.isError) void apiConfig.refetch(); else if (apiEnabled) void refetchApiQuotes(); }} />}
-      {selection?.key === selectionKey && !quote && quotes.length > 0 && <p className="spot-quote-notice" role="status">Your selected quote is no longer available. Choose a quote to continue.</p>}
-      <div className="spot-quote-region" aria-busy={quoteLoading || quoteUpdating}>
-      {!status && <section className="compact-route" aria-label="Execution route"><button className="compact-route-summary" type="button" disabled={!quote} aria-expanded={routeExpanded && Boolean(quote)} aria-controls="route-details" onClick={() => setRouteExpanded(value => !value)}>
-        <span className="compact-route-copy"><span>{quoteUpdating ? "Updating quote (previous estimate)" : "Selected execution path"}</span><strong>{quote ? spotQuoteProtocols(quote) : quoteLoading ? <SpotValueSkeleton>{pay.code} → {receive.code}</SpotValueSkeleton> : "Enter an amount"}</strong></span>
+      {selection?.key === selectionKey && !quote && shownQuotes.length > 0 && <p className="spot-quote-notice" role="status">Your selected quote is no longer available. Choose a quote to continue.</p>}
+      {/* While routes resolve, the Compare quotes box holds this space; an empty reserved region would leave a gap. */}
+      {(status || !quoteLoading) && <div className="spot-quote-region" aria-busy={quoteLoading || quoteUpdating}>
+      {!status && <section className="compact-route" aria-label="Execution route"><button className="compact-route-summary" type="button" disabled={!shownQuote} aria-expanded={routeExpanded && Boolean(shownQuote)} aria-controls="route-details" onClick={() => setRouteExpanded(value => !value)}>
+        <span className="compact-route-copy"><span>Selected execution path</span><strong>{shownQuote ? spotQuoteProtocols(shownQuote) : "Enter an amount"}</strong></span>
         <span className="compact-route-view">View route<Icon name="chevron-down" size={15} className={routeExpanded ? "is-rotated" : ""} /></span>
       </button>
-        {quote && <SpotAccordion open={routeExpanded} id="route-details"><div className="compact-route-details"><SpotRouteDetails quote={quote} />
+        {shownQuote && <SpotAccordion open={routeExpanded} id="route-details"><div className="compact-route-details"><SpotRouteDetails quote={shownQuote} />
         </div></SpotAccordion>}
       </section>}
       {status && <div className={`spot-status spot-status--${status.warning ? "warning" : "error"}`} role={status.warning ? "status" : "alert"} id={amountError || inputError ? "spot-amount-error" : undefined}><strong>{status.title}</strong><p>{status.body}</p></div>}
-      </div>
+      </div>}
       {uncertain && <div className="trade-alert trade-alert--warning" role="status"><div><strong>Awaiting verified confirmation</strong><p>{message}</p>{explorer && <a href={explorer} target="_blank" rel="noopener noreferrer">View {SPOT_NETWORK.name} transaction</a>}</div></div>}
       <div className="spot-transaction-info">
       <div className="fee-disclosure"><button className="fee-summary-toggle" type="button" aria-expanded={feesExpanded} aria-controls="spot-transaction-details" onClick={() => setFeesExpanded(value => !value)}><span>Transaction details</span><Icon name="chevron-down" size={17} className={feesExpanded ? "is-rotated" : ""} /></button>
         <SpotAccordion open={feesExpanded} id="spot-transaction-details"><dl className="trade-breakdown fee-detail-rows">
           <div className="trade-breakdown-row"><dt>Minimum received</dt><dd>{minimum ? formatSpotQuoteAmount(minimum, 2, spotAssetDecimals(receive)) + " " + receive.code : quoteLoading ? <SpotValueSkeleton>0,000.00 {receive.code}</SpotValueSkeleton> : "—"}</dd></div>
           <div className="trade-breakdown-row"><dt>Slippage</dt><dd>{bps ? bps / 100 + "%" : "—"}</dd></div>
-          <div className="trade-breakdown-row"><dt>Quoted output</dt><dd>{quote ? formatSpotQuoteAmount(quote.output, 2, spotAssetDecimals(receive)) + " " + receive.code : quoteLoading ? <SpotValueSkeleton>0,000.00 {receive.code}</SpotValueSkeleton> : "—"}</dd></div>
+          <div className="trade-breakdown-row"><dt>Quoted output</dt><dd>{shownQuote ? formatSpotQuoteAmount(shownQuote.output, 2, spotAssetDecimals(receive)) + " " + receive.code : quoteLoading ? <SpotValueSkeleton>0,000.00 {receive.code}</SpotValueSkeleton> : "—"}</dd></div>
           <div className="trade-breakdown-row"><dt>Network fee limit</dt><dd>{networkStatus === "checking" ? <SpotValueSkeleton>Up to 0.02 XLM</SpotValueSkeleton> : <>Up to {formatSpotFee(feeCap + trustlineFee)} XLM</>}</dd></div>
           {needsTrustline && <div className="trade-breakdown-row"><dt>Additional trustline reserve</dt><dd>0.50 XLM</dd></div>}
         </dl></SpotAccordion>

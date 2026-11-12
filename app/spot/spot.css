@@ -58,7 +58,7 @@
 [data-spot-review] .trade-breakdown-row dt { color: var(--trade-text-secondary); }
 [data-spot-review] .trade-breakdown-row dd { color: var(--trade-text-primary); overflow-wrap: anywhere; }
 [data-spot-review] .review-actions { margin-top: var(--trade-space-6); }
-@media (prefers-reduced-motion: reduce) { [data-spot-review] .pending-spinner { animation: none; } .spot-quote-mark::after, .spot-workspace .spot-transaction-info .spot-accordion { transition: none; } }
+@media (prefers-reduced-motion: reduce) { [data-spot-review] .pending-spinner, .spot-quote-spinner { animation: none; } .spot-quote-mark::after, .spot-workspace .spot-transaction-info .spot-accordion { transition: none; } }
 [data-spot-assets] :focus-visible, [data-spot-review] :focus-visible, .spot-workspace .spot-inline-action:focus-visible { outline: 2px solid var(--trade-accent-text); outline-offset: 3px; }
 .spot-value-skeleton { display: inline-block; max-width: 100%; vertical-align: top; color: transparent; pointer-events: none; user-select: none; }
 .spot-workspace .amount-card-meta { min-height: 1.125rem; }
@@ -81,6 +81,9 @@
 .spot-quote-choice { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: var(--trade-space-3); align-items: center; min-height: 4rem; box-sizing: border-box; padding: var(--trade-space-3); cursor: pointer; }
 .spot-quote-radio { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); border: 0; white-space: nowrap; appearance: none; }
 .spot-quote-mark { display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center; width: 1.125rem; height: 1.125rem; box-sizing: border-box; border: 2px solid var(--trade-border-strong); border-radius: 50%; transition: border-color var(--trade-duration-control) var(--trade-ease-standard); }
+.spot-quote-loading { display: flex; min-height: 4rem; box-sizing: border-box; align-items: center; gap: var(--trade-space-3); padding: var(--trade-space-3); border: 1px solid var(--trade-border-default); border-radius: var(--trade-radius-control); background: var(--trade-bg-raised); color: var(--trade-text-secondary); font-size: var(--trade-type-small-size); }
+/* Same footprint as .spot-quote-mark, so the first radio lands where the spinner was. */
+.spot-quote-spinner { width: 1.125rem; height: 1.125rem; flex: 0 0 auto; box-sizing: border-box; border: 2px solid var(--trade-border-strong); border-top-color: var(--trade-accent-text); border-radius: 50%; animation: trade-spin .85s linear infinite; }
 .spot-quote-mark::after { content: ""; width: .5rem; height: .5rem; border-radius: 50%; background: var(--trade-accent); opacity: 0; transform: scale(.4); transition: opacity var(--trade-duration-control) var(--trade-ease-enter), transform var(--trade-duration-control) cubic-bezier(.16, 1, .3, 1); }
 .spot-quote-option:hover:not([data-selected="true"]) .spot-quote-mark { border-color: var(--trade-text-secondary); }
 .spot-quote-option[data-selected="true"] .spot-quote-mark { border-color: var(--trade-accent); }

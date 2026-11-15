@@ -1,9 +1,8 @@
 import type { Metadata } from "next";
+import Script from "next/script";
 import "@fontsource-variable/inter";
 import "./globals.css";
 import { AppProviders } from "../components/wallet-provider";
-import { connection } from "next/server";
-import { configureFrontendTracker } from "@lumix/tracker";
 
 export const metadata: Metadata = {
   title: "Spot | Lumix",
@@ -21,16 +20,7 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
 
 const themeInitScript = `(function(){var t="dark";try{var s=localStorage.getItem("lumix-theme");if(s==="light"||s==="dark")t=s}catch(e){}document.documentElement.setAttribute("data-theme",t)})()`;
 
-export default async function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
-  await connection();
-  const visitors = configureFrontendTracker({
-    NODE_ENV: process.env.NODE_ENV,
-    FRONT_VISITOR_ENABLED: process.env.FRONT_VISITOR_ENABLED,
-    FRONT_VISITOR_MODE: process.env.FRONT_VISITOR_MODE,
-    FRONT_VISITOR_ORIGIN: process.env.FRONT_VISITOR_ORIGIN,
-    FRONT_VISITOR_ENDPOINT: process.env.FRONT_VISITOR_ENDPOINT,
-    FRONT_VISITOR_REVIEW_ID: process.env.FRONT_VISITOR_REVIEW_ID,
-  });
+export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="en" data-theme="dark" suppressHydrationWarning>
       <head>
@@ -38,7 +28,15 @@ export default async function RootLayout({ children }: Readonly<{ children: Reac
       </head>
       <body>
         <span hidden dangerouslySetInnerHTML={{ __html: `<!--${directionContract}-->` }} />
-        <AppProviders tracker={visitors}>{children}</AppProviders>
+        <AppProviders>{children}</AppProviders>
+        <Script async src="https://www.googletagmanager.com/gtm.js?id=GTM-W7DXCBZ9" strategy="afterInteractive" />
+        <Script id="google-tag-init" strategy="afterInteractive">
+          {`
+            window.dataLayer = window.dataLayer || [];
+            function gtag(){dataLayer.push(arguments);}
+            gtag('js', new Date());
+          `}
+        </Script>
       </body>
     </html>
   );

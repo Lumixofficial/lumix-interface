@@ -8,8 +8,6 @@ import {
   useState,
 } from "react";
 import { AppRouteTracker } from "./app-navigation";
-import { usePathname } from "next/navigation";
-import { initializeTracker, type TrackerOptions } from "@lumix/tracker";
 
 export type BalanceStatus = "idle" | "loading" | "success" | "error";
 
@@ -62,12 +60,7 @@ const disconnectedWallet: WalletContextValue = {
 
 const WalletContext = createContext<WalletContextValue>(disconnectedWallet);
 
-export function AppProviders({ children, tracker }: { children: ReactNode; tracker?: TrackerOptions }) {
-  const pathname = usePathname();
-  useEffect(() => {
-    // The package owns the document singleton, including Strict Mode deduplication.
-    if (tracker) initializeTracker(tracker).pageview();
-  }, [pathname, tracker]);
+export function AppProviders({ children }: { children: ReactNode }) {
   const [wallet, setWallet] = useState<WalletContextValue>(disconnectedWallet);
   const [Runtime, setRuntime] = useState<typeof import("./blux-runtime").BluxRuntime>();
 
